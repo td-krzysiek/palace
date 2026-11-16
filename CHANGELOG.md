@@ -21,6 +21,14 @@ See the [developer notes on schema versioning](https://awslabs.github.io/palace/
 
   - `validate-config` accepts several configuration files and validates them in one Julia
     session. [PR 1180](https://github.com/awslabs/palace/pull/1180).
+  - Added `Boundaries.LumpedPort[].ExcitationAmplitude` and `ExcitationPhase` (degrees),
+    a complex weight a = A e^{iφ} on the unit-power incident wave of each lumped port, so
+    ports sharing an `Excitation` index can be driven with different amplitudes and phases.
+    S-parameters of single-port excitations are normalized by the weight; with a phase that
+    is not a multiple of 180 degrees `port-V.csv` and `port-I.csv` report the real and
+    imaginary parts of the incident voltage and current. A phase that is not a multiple of
+    180 degrees is an error for transient simulations. SchemaVer 4-3-0
+    [PR 1169](https://github.com/awslabs/palace/pull/1169).
 
 #### Interface Changes
 
@@ -52,6 +60,14 @@ See the [developer notes on schema versioning](https://awslabs.github.io/palace/
 
 #### Performance Improvements
 
+  - Used two levels of aggressive coarsening in the BoomerAMG coarse solver of the
+    multigrid preconditioner of the divergence-free projection, instead of one. Its
+    V-cycle is latency bound at high process counts, and the shorter hierarchy makes it
+    faster. [PR 1149](https://github.com/awslabs/palace/pull/1149).
+  - Uniform frequency sweeps of driven simulations release the linear solver and system
+    matrices after the last solve, before the final field output and error estimation.
+    This lowers the peak memory when the final postprocessing sets it.
+    [PR 1087](https://github.com/awslabs/palace/pull/1087).
   - Added a STRUMPACK patch for
     [pghysels/STRUMPACK#165](https://github.com/pghysels/STRUMPACK/pull/165), which lowers
     the latency of the distributed triangular solves of the solve phase for a few
@@ -158,6 +174,13 @@ See the [developer notes on schema versioning](https://awslabs.github.io/palace/
     first diagonal entry of the tensor was equal to the scalar to a relative 1e-9. In one
     `"BoundaryMode"` example this changed the propagation constant by 6%.
     [PR 1209](https://github.com/awslabs/palace/pull/1209).
+  - Fixed the flux recovery in the error estimators to use the projection which minimizes the
+    error it is measured in (ε⁻¹-weighted for the electric flux, μ-weighted for the magnetic
+    field). The unweighted projection overestimated the error in the low-permittivity
+    elements next to a dielectric interface, by up to an order of magnitude next to a
+    sapphire substrate, and AMR spent refinement there. The error indicator decreases for
+    models with material interfaces, and their AMR meshes change.
+    [PR 1072](https://github.com/awslabs/palace/pull/1072).
   - Fixed driven frequency sweeps aborting with "... not found in sample frequencies!" when
     overlapping `"Samples"` ranges compute the same frequency with different rounding.
     [PR 1192](https://github.com/awslabs/palace/pull/1192).
