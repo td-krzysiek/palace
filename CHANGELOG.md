@@ -186,6 +186,12 @@ See the [developer notes on schema versioning](https://awslabs.github.io/palace/
     sapphire substrate, and AMR spent refinement there. The error indicator decreases for
     models with material interfaces, and their AMR meshes change.
     [PR 1072](https://github.com/awslabs/palace/pull/1072).
+  - Fixed the marking of tetrahedra for conformal refinement, which could differ between the
+    processes from 3 processes on and leave a mesh that was not conforming across them. The
+    MFEM patch of [mfem/mfem#3847](https://github.com/mfem/mfem/pull/3847) is replaced by its
+    commits with their fixes: edges are ordered by exact length, then by direction, the same
+    for any partition. Adapted meshes can differ from before.
+    [PR XXXX](https://github.com/awslabs/palace/pull/XXXX).
   - Fixed driven frequency sweeps aborting with "... not found in sample frequencies!" when
     overlapping `"Samples"` ranges compute the same frequency with different rounding.
     [PR 1192](https://github.com/awslabs/palace/pull/1192).

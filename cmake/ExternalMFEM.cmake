@@ -429,11 +429,13 @@ include(PatchHelpers)
 set(MFEM_PATCH_DIR "${CMAKE_BINARY_DIR}/extern/mfem-patches")
 set(MFEM_PATCH_FILES)
 
-# https://github.com/mfem/mfem/pull/3847
-download_patch(MFEM_PATCH_FILES "${MFEM_PATCH_DIR}"
-  mfem_pr3847.diff
-  "https://github.com/mfem/mfem/compare/2d574015756711029556c14d096ca52c15d5b663...50ead1a9a785e3273b2a72ff59ac8ed8a496b498.diff"
-  e9be1a0d4b2642ed1b72f31c36065cf0aacbe342b6594d5d943782c73a6177f4
+# Marking of tetrahedra: https://github.com/mfem/mfem/pull/3847 and its fixes (shared order
+# of edges across processes, exact comparison of lengths, face neighbor data after a new
+# marking, point matrices of uniform refinement), for MFEM 4.10 and without CHANGELOG; to be
+# replaced by the URL of the pull request that supersedes PR 3847. First: the patches below
+# apply after it.
+list(APPEND MFEM_PATCH_FILES
+  "${CMAKE_SOURCE_DIR}/extern/patch/mfem/mfem_par_tet_marking.diff"
 )
 # https://github.com/mfem/mfem/pull/5353
 download_patch(MFEM_PATCH_FILES "${MFEM_PATCH_DIR}"

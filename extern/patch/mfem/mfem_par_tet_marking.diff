@@ -1,0 +1,2481 @@
+diff --git a/mesh/element.hpp b/mesh/element.hpp
+index bcc559cc557c62c73959b2f22f946734b7f348d2..6ef2ee39348daf821917e0a87a626ba8f6cb19a3 100644
+--- a/mesh/element.hpp
++++ b/mesh/element.hpp
+@@ -90,9 +90,6 @@ public:
+ 
+    virtual const int *GetFaceVertices(int fi) const = 0;
+ 
+-   /// Mark the longest edge by assuming/changing the order of the vertices.
+-   virtual void MarkEdge(const DSTable &v_to_v, const int *length) {}
+-
+    /// Return 1 if the element needs refinement in order to get conforming mesh.
+    virtual int NeedRefinement(HashTable<Hashed2> &v_to_v) const { return 0; }
+ 
+diff --git a/mesh/mesh.cpp b/mesh/mesh.cpp
+index 876ff561e9e81fc8bd882f3809f80e75f68d193b..ecba439c26a768c78a4c50cdb4282bc58698d51f 100644
+--- a/mesh/mesh.cpp
++++ b/mesh/mesh.cpp
+@@ -25,6 +25,7 @@
+ #include "../fem/quadinterpolator.hpp"
+ 
+ // headers already included by mesh.hpp: <iostream>, <array>, <map>, <memory>
++#include <algorithm>
+ #include <sstream>
+ #include <fstream>
+ #include <limits>
+@@ -2582,10 +2583,12 @@ void Mesh::FinalizeTriMesh(int generate_edges, int refine, bool fix_orientation)
+ {
+    FinalizeCheck();
+    CheckElementOrientation(fix_orientation);
++   // MarkForRefinement() marks the simplices that SetMeshGen() finds.
++   SetMeshGen();
+ 
+    if (refine)
+    {
+-      MarkTriMeshForRefinement();
++      MarkForRefinement();
+    }
+ 
+    if (generate_edges)
+@@ -2603,8 +2606,6 @@ void Mesh::FinalizeTriMesh(int generate_edges, int refine, bool fix_orientation)
+    NumOfFaces = 0;
+ 
+    SetAttributes();
+-
+-   SetMeshGen();
+ }
+ 
+ void Mesh::FinalizeQuadMesh(int generate_edges, int refine,
+@@ -3106,82 +3107,220 @@ void Mesh::ReorderElements(const Array<int> &ordering, bool reorder_vertices)
+ }
+ 
+ 
+-void Mesh::MarkForRefinement()
++void Mesh::GetEdgeLengths2(const DSTable &v_to_v, Array<real_t> &lengths,
++                           Array<std::array<real_t, 3>> &dirs) const
+ {
+-   if (meshgen & 1)
++   // The first nonzero component positive: the vector does not depend on the
++   // order of the vertices.
++   auto Canonical = [](std::array<real_t, 3> &d)
+    {
+-      if (Dim == 2)
++      for (int k = 0; k < 3; k++)
+       {
+-         MarkTriMeshForRefinement();
++         if (d[k] == 0.0) { continue; }
++         if (d[k] < 0.0)
++         {
++            for (real_t &c : d) { c = (c == 0.0) ? 0.0 : -c; }
++         }
++         break;
+       }
+-      else if (Dim == 3)
++   };
++   dirs.SetSize(NumOfEdges);
++   const FiniteElementSpace *fes = Nodes ? Nodes->FESpace() : NULL;
++   if (fes == NULL || fes->GetNVDofs() > 0)
++   {
++      // The vertices have one position each: their coordinates, or the values
++      // of their DOFs in the nodes.
++      const real_t *nodes = Nodes ? Nodes->HostRead() : NULL;
++      Array<int> ivdofs, jvdofs;
++      for (int i = 0; i < NumOfVertices; i++)
+       {
+-         DSTable v_to_v(NumOfVertices);
+-         GetVertexToVertexTable(v_to_v);
+-         MarkTetMeshForRefinement(v_to_v);
++         if (nodes) { fes->GetVertexVDofs(i, ivdofs); }
++         for (DSTable::RowIterator it(v_to_v, i); !it; ++it)
++         {
++            const int j = it.Column();
++            std::array<real_t, 3> d = {0.0, 0.0, 0.0};
++            if (nodes == NULL)
++            {
++               const real_t *vi = vertices[i]();
++               const real_t *vj = vertices[j]();
++               for (int k = 0; k < spaceDim; k++) { d[k] = vi[k] - vj[k]; }
++            }
++            else
++            {
++               fes->GetVertexVDofs(j, jvdofs);
++               for (int k = 0; k < ivdofs.Size(); k++)
++               {
++                  d[k] = nodes[ivdofs[k]] - nodes[jvdofs[k]];
++               }
++            }
++            Canonical(d);
++            dirs[it.Index()] = d;
++         }
+       }
++      EdgeLengths2(dirs, lengths);
++      return;
+    }
+-}
+ 
+-void Mesh::MarkTriMeshForRefinement()
+-{
+-   // Mark the longest triangle edge by rotating the indices so that
+-   // vertex 0 - vertex 1 is the longest edge in the triangle.
+-   DenseMatrix pmat;
+-   for (int i = 0; i < NumOfElements; i++)
+-   {
+-      if (elements[i]->GetType() == Element::TRIANGLE)
++   // Nodes without vertex DOFs (discontinuous nodes, as those of periodic
++   // meshes): a vertex has a position in each of its elements. An edge takes
++   // the chord between its two vertices as mapped by the element of lowest
++   // index that contains it, the positions of the vertices being those of the
++   // element transformation at the reference vertices (the shape functions at
++   // the vertices computed once per element geometry).
++   Array<bool> done(NumOfEdges);
++   done = false;
++   const real_t *nodes = Nodes->HostRead();
++   const FiniteElement *vertex_fe[Geometry::NumGeom] = {};
++   DenseMatrix vertex_shape[Geometry::NumGeom];
++   Vector shape;
++   DenseMatrix pm, x;
++   Array<int> vdofs;
++   for (int e = 0; e < NumOfElements; e++)
++   {
++      const Element *el = elements[e];
++      const int *v = el->GetVertices();
++      const int ne = el->GetNEdges();
++      // The vertices of the element in the order that its nodes follow.
++      const int *node_v = nodes_elem_vert ? nodes_elem_vert->GetRow(e) : v;
++      bool needed = false;
++      for (int k = 0; k < ne && !needed; k++)
++      {
++         const int *ev = el->GetEdgeVertices(k);
++         needed = !done[v_to_v(v[ev[0]], v[ev[1]])];
++      }
++      if (!needed) { continue; }
++      const FiniteElement *fe = fes->GetFE(e);
++      const Geometry::Type geom = el->GetGeometryType();
++      const int nd = fe->GetDof(), nv = el->GetNVertices();
++      DenseMatrix &vs = vertex_shape[geom];
++      if (vertex_fe[geom] != fe)
++      {
++         const IntegrationRule &ir = *Geometries.GetVertices(geom);
++         vs.SetSize(nd, nv);
++         shape.SetSize(nd);
++         for (int k = 0; k < nv; k++)
++         {
++            fe->CalcShape(ir.IntPoint(k), shape);
++            vs.SetCol(k, shape);
++         }
++         vertex_fe[geom] = fe;
++      }
++      // As GetElementTransformation() and IsoparametricTransformation::
++      // Transform(): the same values, summed in the same order.
++      fes->GetElementVDofs(e, vdofs);
++      pm.SetSize(spaceDim, nd);
++      for (int d = 0; d < spaceDim; d++)
++      {
++         for (int j = 0; j < nd; j++) { pm(d, j) = nodes[vdofs[nd*d + j]]; }
++      }
++      x.SetSize(spaceDim, nv);
++      for (int k = 0; k < nv; k++)
++      {
++         for (int d = 0; d < spaceDim; d++)
++         {
++            x(d, k) = 0.0;
++            for (int j = 0; j < nd; j++) { x(d, k) += pm(d, j) * vs(j, k); }
++         }
++      }
++      for (int k = 0; k < ne; k++)
+       {
+-         GetPointMatrix(i, pmat);
+-         static_cast<Triangle*>(elements[i])->MarkEdge(pmat);
++         const int *ev = el->GetEdgeVertices(k);
++         const int edge = v_to_v(v[ev[0]], v[ev[1]]);
++         if (done[edge]) { continue; }
++         done[edge] = true;
++         int a = ev[0], b = ev[1];
++         if (node_v != v)
++         {
++            a = static_cast<int>(std::find(node_v, node_v + nv, v[a]) - node_v);
++            b = static_cast<int>(std::find(node_v, node_v + nv, v[b]) - node_v);
++         }
++         std::array<real_t, 3> d = {0.0, 0.0, 0.0};
++         for (int c = 0; c < x.Height(); c++) { d[c] = x(c, a) - x(c, b); }
++         Canonical(d);
++         dirs[edge] = d;
+       }
+    }
++   EdgeLengths2(dirs, lengths);
+ }
+ 
+-void Mesh::GetEdgeOrdering(const DSTable &v_to_v, Array<int> &order)
++void Mesh::EdgeLengths2(const Array<std::array<real_t, 3>> &dirs,
++                        Array<real_t> &lengths)
+ {
+-   NumOfEdges = v_to_v.NumberOfEntries();
+-   order.SetSize(NumOfEdges);
+-   Array<Pair<real_t, int> > length_idx(NumOfEdges);
++   // Explicit fused multiply-adds: the compiler contracted some of these products
++   // and not others (vectorized body, scalar tail), so the length of an edge
++   // depended on its index, and the marking on the numbering.
++   lengths.SetSize(dirs.Size());
++   for (int i = 0; i < dirs.Size(); i++)
++   {
++      const std::array<real_t, 3> &d = dirs[i];
++      lengths[i] = std::fma(d[2], d[2], std::fma(d[1], d[1], d[0]*d[0]));
++   }
++}
+ 
+-   for (int i = 0; i < NumOfVertices; i++)
++void Mesh::MarkForRefinement()
++{
++   if (meshgen & 1)
+    {
+-      for (DSTable::RowIterator it(v_to_v, i); !it; ++it)
++      DSTable v_to_v(NumOfVertices);
++      GetVertexToVertexTable(v_to_v);
++      NumOfEdges = v_to_v.NumberOfEntries();
++      if (Dim == 2)
+       {
+-         int j = it.Index();
+-         length_idx[j].one = GetLength(i, it.Column());
+-         length_idx[j].two = j;
++         MarkTriMeshForRefinement(v_to_v);
++      }
++      else if (Dim == 3)
++      {
++         MarkTetMeshForRefinement(v_to_v);
+       }
+    }
++}
+ 
+-   // Sort by increasing edge-length.
+-   length_idx.Sort();
++void Mesh::MarkTriMeshForRefinement(const DSTable &v_to_v)
++{
++   // Mark the longest triangle edge by rotating the indices so that vertex 0 -
++   // vertex 1 is the longest edge in the triangle; between edges of equal
++   // length, the larger vector between the vertices (GetEdgeLengths2()).
++   Array<real_t> lengths;
++   Array<std::array<real_t, 3>> dirs;
++   GetEdgeLengths2(v_to_v, lengths, dirs);
+ 
+-   for (int i = 0; i < NumOfEdges; i++)
++   for (int i = 0; i < NumOfElements; i++)
+    {
+-      order[length_idx[i].two] = i;
++      if (elements[i]->GetType() == Element::TRIANGLE)
++      {
++         MFEM_ASSERT(dynamic_cast<Triangle *>(elements[i]),
++                     "Unexpected non-Triangle element type");
++         static_cast<Triangle *>(elements[i])->MarkEdge(v_to_v, lengths, dirs);
++      }
+    }
+ }
+ 
+ void Mesh::MarkTetMeshForRefinement(const DSTable &v_to_v)
+ {
+-   // Mark the longest tetrahedral edge by rotating the indices so that
+-   // vertex 0 - vertex 1 is the longest edge in the element.
+-   Array<int> order;
+-   GetEdgeOrdering(v_to_v, order);
++   // Mark the longest tetrahedral edge by rotating the indices so that vertex
++   // 0 - vertex 1 is the longest edge in the element; between edges of equal
++   // length, the larger vector between the vertices (GetEdgeLengths2()).
++   Array<real_t> lengths;
++   Array<std::array<real_t, 3>> dirs;
++   GetEdgeLengths2(v_to_v, lengths, dirs);
+ 
+    for (int i = 0; i < NumOfElements; i++)
+    {
+       if (elements[i]->GetType() == Element::TETRAHEDRON)
+       {
+-         elements[i]->MarkEdge(v_to_v, order);
++         MFEM_ASSERT(dynamic_cast<Tetrahedron *>(elements[i]),
++                     "Unexpected non-Tetrahedron element type");
++         static_cast<Tetrahedron *>(elements[i])->MarkEdge(v_to_v, lengths,
++                                                           dirs);
+       }
+    }
+    for (int i = 0; i < NumOfBdrElements; i++)
+    {
+       if (boundary[i]->GetType() == Element::TRIANGLE)
+       {
+-         boundary[i]->MarkEdge(v_to_v, order);
++         MFEM_ASSERT(dynamic_cast<Triangle *>(boundary[i]),
++                     "Unexpected non-Triangle element type");
++         static_cast<Triangle *>(boundary[i])->MarkEdge(v_to_v, lengths, dirs);
+       }
+    }
+ }
+@@ -3489,6 +3628,9 @@ void Mesh::DoNodeReorder(DSTable *old_v_to_v, Table *old_elem_vert)
+          CheckBdrElementOrientation();
+       }
+    }
++   // The space of the nodes is built on the topology derived from the edges
++   // and faces too (for a ParMesh, its shared edges and faces).
++   UpdateDerivedTopology();
+    // To force FE space update, we need to increase 'sequence':
+    sequence++;
+    nodes_sequence++;
+@@ -3549,6 +3691,8 @@ void Mesh::FinalizeTetMesh(int generate_edges, int refine, bool fix_orientation)
+ {
+    FinalizeCheck();
+    CheckElementOrientation(fix_orientation);
++   // MarkForRefinement() marks the simplices that SetMeshGen() finds.
++   SetMeshGen();
+ 
+    if (!HasBoundaryElements())
+    {
+@@ -3559,9 +3703,7 @@ void Mesh::FinalizeTetMesh(int generate_edges, int refine, bool fix_orientation)
+ 
+    if (refine)
+    {
+-      DSTable v_to_v(NumOfVertices);
+-      GetVertexToVertexTable(v_to_v);
+-      MarkTetMeshForRefinement(v_to_v);
++      MarkForRefinement();
+    }
+ 
+    GetElementToFaceTable();
+@@ -3582,8 +3724,6 @@ void Mesh::FinalizeTetMesh(int generate_edges, int refine, bool fix_orientation)
+    }
+ 
+    SetAttributes();
+-
+-   SetMeshGen();
+ }
+ 
+ void Mesh::FinalizeWedgeMesh(int generate_edges, int refine,
+@@ -3792,14 +3932,21 @@ void Mesh::Finalize(bool refine, bool fix_orientation)
+       PrepareNodeReorder(&old_v_to_v, &old_elem_vert);
+    }
+ 
++   bool reoriented = false;
+    if (check_orientation)
+    {
+       // check and optionally fix element orientation
+-      CheckElementOrientation(fix_orientation);
++      reoriented = CheckElementOrientation(fix_orientation) > 0 &&
++                   fix_orientation;
+    }
+    if (refine)
+    {
++      // Until DoNodeReorder() below, the nodes follow the vertex orders of
++      // old_elem_vert, not those that the check fixed: the marking reads nodes
++      // without vertex DOFs through the elements in that order.
++      nodes_elem_vert = reoriented ? old_elem_vert : NULL;
+       MarkForRefinement();   // may change topology!
++      nodes_elem_vert = NULL;
+    }
+ 
+    if (may_change_topology)
+@@ -3827,8 +3974,7 @@ void Mesh::Finalize(bool refine, bool fix_orientation)
+    // only perform it when Dim == spaceDim.
+    if (Dim >= 2 && Dim == spaceDim)
+    {
+-      const int num_faces = GetNumFaces();
+-      for (int i = 0; i < num_faces; i++)
++      for (int i = 0; i < GetNumFaces(); i++)
+       {
+          MFEM_VERIFY(faces_info[i].Elem2No < 0 ||
+                      faces_info[i].Elem2Inf%2 != 0, "Invalid mesh topology."
+@@ -4531,8 +4677,6 @@ void Mesh::Make2D(int nx, int ny, Element::Type type,
+          boundary[2*nx+j] = new Segment((j+1)*m, j*m, 4);
+          boundary[2*nx+ny+j] = new Segment(j*m+nx, (j+1)*m+nx, 2);
+       }
+-
+-      // MarkTriMeshForRefinement(); // done in Finalize(...)
+    }
+    else
+    {
+@@ -7345,37 +7489,21 @@ static const char *fixed_or_not[] = { "fixed", "NOT FIXED" };
+ 
+ int Mesh::CheckElementOrientation(bool fix_it)
+ {
+-   int i, j, k, wo = 0, fo = 0;
+-   real_t *v[4];
++   int wo = 0, fo = 0;
+ 
+    if (Dim == 2 && spaceDim == 2)
+    {
+       DenseMatrix J(2, 2);
+ 
+-      for (i = 0; i < NumOfElements; i++)
++      for (int i = 0; i < NumOfElements; i++)
+       {
+-         int *vi = elements[i]->GetVertices();
+-         if (Nodes == NULL)
+-         {
+-            for (j = 0; j < 3; j++)
+-            {
+-               v[j] = vertices[vi[j]]();
+-            }
+-            for (j = 0; j < 2; j++)
+-               for (k = 0; k < 2; k++)
+-               {
+-                  J(j, k) = v[j+1][k] - v[0][k];
+-               }
+-         }
+-         else
+-         {
+-            // only check the Jacobian at the center of the element
+-            GetElementJacobian(i, J);
+-         }
++         // only check the Jacobian at the center of the element
++         GetElementJacobian(i, J);
+          if (J.Det() < 0.0)
+          {
+             if (fix_it)
+             {
++               int *vi = elements[i]->GetVertices();
+                switch (GetElementType(i))
+                {
+                   case Element::TRIANGLE:
+@@ -7395,89 +7523,42 @@ int Mesh::CheckElementOrientation(bool fix_it)
+          }
+       }
+    }
+-
+-   if (Dim == 3)
++   else if (Dim == 3)
+    {
+       DenseMatrix J(3, 3);
+ 
+-      for (i = 0; i < NumOfElements; i++)
++      for (int i = 0; i < NumOfElements; i++)
+       {
+-         int *vi = elements[i]->GetVertices();
+-         switch (GetElementType(i))
++         // only check the Jacobian at the center of the element
++         GetElementJacobian(i, J);
++         if (J.Det() < 0.0)
+          {
+-            case Element::TETRAHEDRON:
+-               if (Nodes == NULL)
+-               {
+-                  for (j = 0; j < 4; j++)
+-                  {
+-                     v[j] = vertices[vi[j]]();
+-                  }
+-                  for (j = 0; j < 3; j++)
+-                     for (k = 0; k < 3; k++)
+-                     {
+-                        J(j, k) = v[j+1][k] - v[0][k];
+-                     }
+-               }
+-               else
+-               {
+-                  // only check the Jacobian at the center of the element
+-                  GetElementJacobian(i, J);
+-               }
+-               if (J.Det() < 0.0)
++            if (fix_it)
++            {
++               int *vi = elements[i]->GetVertices();
++               switch (GetElementType(i))
+                {
+-                  wo++;
+-                  if (fix_it)
+-                  {
++                  case Element::TETRAHEDRON:
+                      mfem::Swap(vi[0], vi[1]);
+                      fo++;
+-                  }
+-               }
+-               break;
+-
+-            case Element::WEDGE:
+-               // only check the Jacobian at the center of the element
+-               GetElementJacobian(i, J);
+-               if (J.Det() < 0.0)
+-               {
+-                  wo++;
+-                  if (fix_it)
+-                  {
++                     break;
++                  case Element::WEDGE:
+                      // how?
+-                  }
+-               }
+-               break;
+-
+-            case Element::PYRAMID:
+-               // only check the Jacobian at the center of the element
+-               GetElementJacobian(i, J);
+-               if (J.Det() < 0.0)
+-               {
+-                  wo++;
+-                  if (fix_it)
+-                  {
++                     break;
++                  case Element::PYRAMID:
+                      mfem::Swap(vi[1], vi[3]);
+                      fo++;
+-                  }
+-               }
+-               break;
+-
+-            case Element::HEXAHEDRON:
+-               // only check the Jacobian at the center of the element
+-               GetElementJacobian(i, J);
+-               if (J.Det() < 0.0)
+-               {
+-                  wo++;
+-                  if (fix_it)
+-                  {
++                     break;
++                  case Element::HEXAHEDRON:
+                      // how?
+-                  }
++                     break;
++                  default:
++                     MFEM_ABORT("Invalid 3D element type \""
++                                << GetElementType(i) << "\"");
++                     break;
+                }
+-               break;
+-
+-            default:
+-               MFEM_ABORT("Invalid 3D element type \""
+-                          << GetElementType(i) << "\"");
+-               break;
++            }
++            wo++;
+          }
+       }
+    }
+@@ -8480,24 +8561,12 @@ void Mesh::GetBdrPointMatrix(int i,DenseMatrix &pointmat) const
+ 
+    pointmat.SetSize(spaceDim, nv);
+    for (k = 0; k < spaceDim; k++)
++   {
+       for (j = 0; j < nv; j++)
+       {
+          pointmat(k, j) = vertices[v[j]](k);
+       }
+-}
+-
+-real_t Mesh::GetLength(int i, int j) const
+-{
+-   const real_t *vi = vertices[i]();
+-   const real_t *vj = vertices[j]();
+-   real_t length = 0.;
+-
+-   for (int k = 0; k < spaceDim; k++)
+-   {
+-      length += (vi[k]-vj[k])*(vi[k]-vj[k]);
+    }
+-
+-   return sqrt(length);
+ }
+ 
+ // static method
+diff --git a/mesh/mesh.hpp b/mesh/mesh.hpp
+index 99dd00044b36eec241c1bcb4b788dcd7c468bf93..d3ba973fcd93a349ec590974c0f1f3138b7329da 100644
+--- a/mesh/mesh.hpp
++++ b/mesh/mesh.hpp
+@@ -272,6 +272,11 @@ protected:
+    GridFunction *Nodes;
+    int own_nodes;
+ 
++   /** While Finalize() marks a mesh whose orientations it has just fixed: the
++       vertices of each element in the order its #Nodes still follow; NULL
++       otherwise. */
++   const Table *nodes_elem_vert = NULL;
++
+    static const int vtk_quadratic_tet[10];
+    static const int vtk_quadratic_pyramid[13];
+    static const int vtk_quadratic_wedge[18];
+@@ -402,12 +407,21 @@ protected:
+    /** Also, initializes #mesh_geoms. */
+    void SetMeshGen();
+ 
+-   /// Return the length of the segment from node i to node j.
+-   real_t GetLength(int i, int j) const;
++   /** For each edge of @a v_to_v (GetVertexToVertexTable()): the vector
++       between its vertices, with its first nonzero component positive (the
++       key of the edge among edges of equal length), and its squared length.
++       The vertices are at their coordinates or at the vertex DOFs of the
++       #Nodes; for nodes without vertex DOFs, at their images by the element
++       of lowest index that contains the edge. */
++   void GetEdgeLengths2(const DSTable &v_to_v, Array<real_t> &lengths,
++                        Array<std::array<real_t, 3>> &dirs) const;
++
++   /// The squared lengths of the vectors @a dirs (see GetEdgeLengths2()).
++   static void EdgeLengths2(const Array<std::array<real_t, 3>> &dirs,
++                            Array<real_t> &lengths);
+ 
+    void MarkForRefinement();
+-   void MarkTriMeshForRefinement();
+-   void GetEdgeOrdering(const DSTable &v_to_v, Array<int> &order);
++   void MarkTriMeshForRefinement(const DSTable &v_to_v);
+    virtual void MarkTetMeshForRefinement(const DSTable &v_to_v);
+ 
+    // Methods used to prepare and apply permutation of the mesh nodes assuming
+@@ -418,6 +432,11 @@ protected:
+    void PrepareNodeReorder(DSTable **old_v_to_v, Table **old_elem_vert);
+    void DoNodeReorder(DSTable *old_v_to_v, Table *old_elem_vert);
+ 
++   /** Bring the data derived from the numbering of the edges and faces up to
++       date, after they are numbered again; called by DoNodeReorder() before
++       it updates the space of the nodes. Nothing to do for a serial mesh. */
++   virtual void UpdateDerivedTopology() { }
++
+    STable3D *GetFacesTable();
+    STable3D *GetElementToFaceTable(int ret_ftbl = 0);
+ 
+@@ -1159,11 +1178,18 @@ public:
+        - assume that #vertices are defined, if #Nodes == NULL
+        - assume that #Nodes are defined, if #Nodes != NULL.
+        @param[in] refine  If true, prepare the Mesh for conforming refinement of
+-                          triangular or tetrahedral meshes.
++                          triangular or tetrahedral meshes, by marking the
++                          longest edge of each triangle and tetrahedron.
+        @param[in] fix_orientation
+                           If true, fix the orientation of inverted mesh elements
+                           by permuting their vertices.
+ 
++       The marking depends on the geometry only, not on the numbering or the
++       partition: the longest edge, from the vertices or the nodes, compared
++       exactly; between edges of equal length, the larger vector between the
++       vertices (first nonzero component positive), in lexicographic order. A
++       ParMesh also deletes its face neighbor data.
++
+        Before calling this method, call FinalizeTopology() and ensure that the
+        Mesh vertices or nodes are set. */
+    virtual void Finalize(bool refine = false, bool fix_orientation = false);
+diff --git a/mesh/ncmesh.cpp b/mesh/ncmesh.cpp
+index b96c8c55133a21ef07a790fcea6aea2f1e0b42d5..b5b037d0f9157afb717e3086324f60ccd960d566 100644
+--- a/mesh/ncmesh.cpp
++++ b/mesh/ncmesh.cpp
+@@ -5342,7 +5342,9 @@ void CoarseFineTransformations::Clear()
+ {
+    for (int i = 0; i < Geometry::NumGeom; i++)
+    {
+-      point_matrices[i].SetSize(0, 0, 0);
++      // Release the data, which may be external (the static point matrices of
++      // uniform refinement): resized, it would be overwritten.
++      point_matrices[i].Clear();
+    }
+    embeddings.DeleteAll();
+ }
+diff --git a/mesh/pmesh.cpp b/mesh/pmesh.cpp
+index 2cb7633277ff1c1881ffb83d738c15a1ae792f7e..e6d26790586722e6434dd6b252d331f4762fb75b 100644
+--- a/mesh/pmesh.cpp
++++ b/mesh/pmesh.cpp
+@@ -20,6 +20,7 @@
+ #include "../general/text.hpp"
+ #include "../general/globals.hpp"
+ 
++#include <cstdint>
+ #include <iostream>
+ #include <fstream>
+ 
+@@ -762,8 +763,10 @@ void ParMesh::BuildSharedFaceElems(int ntri_faces, int nquad_faces,
+             sface_lface[stria_counter] = lface;
+             if (meshgen == 1) // Tet-only mesh
+             {
+-               Tetrahedron *tet = dynamic_cast<Tetrahedron *>
+-                                  (elements[faces_info[lface].Elem1No]);
++               Element *elem = elements[faces_info[lface].Elem1No];
++               MFEM_ASSERT(dynamic_cast<Tetrahedron *>(elem),
++                           "Unexpected non-Tetrahedron element")
++               auto *tet = static_cast<Tetrahedron *>(elem);
+                // mark the shared face for refinement by reorienting
+                // it according to the refinement flag in the tetrahedron
+                // to which this shared face belongs to.
+@@ -1538,6 +1541,11 @@ void ParMesh::Finalize(bool refine, bool fix_orientation)
+ 
+    // Setup secondary parallel mesh data: sedge_ledge, sface_lface
+    FinalizeParTopo();
++
++   // The marking, or the fixed orientations, may have changed the vertex order
++   // of the elements, and with it the orientations of the shared faces in the
++   // face neighbor data.
++   DeleteFaceNbrData();
+ }
+ 
+ int ParMesh::GetLocalElementNum(long long global_element_num) const
+@@ -1751,98 +1759,46 @@ void ParMesh::GetSharedTriCommunicator(int ordering,
+ 
+ void ParMesh::MarkTetMeshForRefinement(const DSTable &v_to_v)
+ {
+-   Array<int> order;
+-   GetEdgeOrdering(v_to_v, order); // local edge ordering
+-
+-   // create a GroupCommunicator on the shared edges
++   // Mark the longest tetrahedral edge by rotating the indices so that vertex
++   // 0 - vertex 1 is the longest edge in the element; between edges of equal
++   // length, the larger vector between the vertices (GetEdgeLengths2()).
++   Array<real_t> lengths;
++   Array<std::array<real_t, 3>> dirs;
++   GetEdgeLengths2(v_to_v, lengths, dirs);
++
++   // All the ranks of a group use the vectors of its shared edges computed by
++   // the group master, and the lengths of these vectors: the vertex
++   // coordinates (or the nodes) of the ranks can differ by round-off, and the
++   // ranks must compare the same numbers. The communicator uses the default
++   // layout: these arrays are indexed by shared edge.
+    GroupCommunicator sedge_comm(gtopo);
+    GetSharedEdgeCommunicator(0, sedge_comm);
+-
+-   Array<int> sedge_ord(shared_edges.Size());
+-   Array<Pair<int,int> > sedge_ord_map(shared_edges.Size());
+-   for (int k = 0; k < shared_edges.Size(); k++)
+-   {
+-      // sedge_ledge may be undefined -- use shared_edges and v_to_v instead
+-      const int sedge = group_sedge.GetJ()[k];
+-      const int *v = shared_edges[sedge]->GetVertices();
+-      sedge_ord[k] = order[v_to_v(v[0], v[1])];
+-   }
+-
+-   sedge_comm.Bcast<int>(sedge_ord, 1);
+-
+-   for (int k = 0, gr = 1; gr < GetNGroups(); gr++)
+-   {
+-      const int n = group_sedge.RowSize(gr-1);
+-      if (n == 0) { continue; }
+-      sedge_ord_map.SetSize(n);
+-      for (int j = 0; j < n; j++)
+-      {
+-         sedge_ord_map[j].one = sedge_ord[k+j];
+-         sedge_ord_map[j].two = j;
+-      }
+-      SortPairs<int, int>(sedge_ord_map, n);
+-      for (int j = 0; j < n; j++)
+-      {
+-         const int sedge_from = group_sedge.GetJ()[k+j];
+-         const int *v = shared_edges[sedge_from]->GetVertices();
+-         sedge_ord[k+j] = order[v_to_v(v[0], v[1])];
+-      }
+-      std::sort(&sedge_ord[k], &sedge_ord[k] + n);
+-      for (int j = 0; j < n; j++)
+-      {
+-         const int sedge_to = group_sedge.GetJ()[k+sedge_ord_map[j].two];
+-         const int *v = shared_edges[sedge_to]->GetVertices();
+-         order[v_to_v(v[0], v[1])] = sedge_ord[k+j];
+-      }
+-      k += n;
+-   }
+-
+-#ifdef MFEM_DEBUG
++   Array<real_t> sedge_dir(shared_edges.Size());
++   for (int k = 0; k < 3; k++)
+    {
+-      Array<Pair<int, real_t> > ilen_len(order.Size());
+-
+-      for (int i = 0; i < NumOfVertices; i++)
+-      {
+-         for (DSTable::RowIterator it(v_to_v, i); !it; ++it)
+-         {
+-            int j = it.Index();
+-            ilen_len[j].one = order[j];
+-            ilen_len[j].two = GetLength(i, it.Column());
+-         }
+-      }
+-
+-      SortPairs<int, real_t>(ilen_len, order.Size());
+-
+-      real_t d_max = 0.;
+-      for (int i = 1; i < order.Size(); i++)
++      for (int i = 0; i < shared_edges.Size(); i++)
+       {
+-         d_max = std::max(d_max, ilen_len[i-1].two-ilen_len[i].two);
++         const int *v = shared_edges[i]->GetVertices();
++         sedge_dir[i] = dirs[v_to_v(v[0], v[1])][k];
+       }
+-
+-#if 0
+-      // Debug message from every MPI rank.
+-      mfem::out << "proc. " << MyRank << '/' << NRanks << ": d_max = " << d_max
+-                << endl;
+-#else
+-      // Debug message just from rank 0.
+-      real_t glob_d_max;
+-      MPI_Reduce(&d_max, &glob_d_max, 1, MPITypeMap<real_t>::mpi_type, MPI_MAX, 0,
+-                 MyComm);
+-      if (MyRank == 0)
++      sedge_comm.Bcast(sedge_dir);
++      for (int i = 0; i < shared_edges.Size(); i++)
+       {
+-         mfem::out << "glob_d_max = " << glob_d_max << endl;
++         const int *v = shared_edges[i]->GetVertices();
++         dirs[v_to_v(v[0], v[1])][k] = sedge_dir[i];
+       }
+-#endif
+    }
+-#endif
++   EdgeLengths2(dirs, lengths);
+ 
+-   // use 'order' to mark the tets, the boundary triangles, and the shared
+-   // triangle faces
++   // Mark the tets, the boundary triangles, and the shared triangle faces
+    for (int i = 0; i < NumOfElements; i++)
+    {
+       if (elements[i]->GetType() == Element::TETRAHEDRON)
+       {
+-         elements[i]->MarkEdge(v_to_v, order);
++         MFEM_ASSERT(dynamic_cast<Tetrahedron *>(elements[i]),
++                     "Unexpected non-Tetrahedron element type");
++         static_cast<Tetrahedron *>(elements[i])->MarkEdge(v_to_v, lengths,
++                                                           dirs);
+       }
+    }
+ 
+@@ -1850,13 +1806,15 @@ void ParMesh::MarkTetMeshForRefinement(const DSTable &v_to_v)
+    {
+       if (boundary[i]->GetType() == Element::TRIANGLE)
+       {
+-         boundary[i]->MarkEdge(v_to_v, order);
++         MFEM_ASSERT(dynamic_cast<Triangle *>(boundary[i]),
++                     "Unexpected non-Triangle element type");
++         static_cast<Triangle *>(boundary[i])->MarkEdge(v_to_v, lengths, dirs);
+       }
+    }
+ 
+    for (int i = 0; i < shared_trias.Size(); i++)
+    {
+-      Triangle::MarkEdge(shared_trias[i].v, v_to_v, order);
++      Triangle::MarkEdge(shared_trias[i].v, v_to_v, lengths, dirs);
+    }
+ }
+ 
+@@ -3290,7 +3248,7 @@ void ParMesh::ReorientTetMesh()
+    Array<int> svert_master_index(svert_lvert);
+    for (int i = 0; i < group_svert.Size(); i++)
+    {
+-      int rank = gtopo.GetGroupMasterRank(i+1);
++      const int rank = gtopo.GetGroupMasterRank(i+1);
+       for (int j = 0; j < group_svert.RowSize(i); j++)
+       {
+          svert_master_rank[group_svert.GetRow(i)[j]] = rank;
+@@ -3420,6 +3378,10 @@ void ParMesh::ReorientTetMesh()
+    // the local edge and face numbering is changed therefore we need to
+    // update sedge_ledge and sface_lface.
+    FinalizeParTopo();
++
++   // The new vertex orders change the orientations of the shared faces in the
++   // face neighbor data, and the faces are numbered again.
++   DeleteFaceNbrData();
+ }
+ 
+ void ParMesh::LocalRefinement(const Array<int> &marked_el, int type)
+diff --git a/mesh/pmesh.hpp b/mesh/pmesh.hpp
+index 193063a13c834a83f6a3c906a3e2729911297b4a..db1c8e0d117aa338d57e26f11df934f7f4220943 100644
+--- a/mesh/pmesh.hpp
++++ b/mesh/pmesh.hpp
+@@ -112,6 +112,9 @@ protected:
+    // Determine sedge_ledge and sface_lface.
+    void FinalizeParTopo();
+ 
++   /// The shared edges and faces of the new numbering (FinalizeParTopo()).
++   void UpdateDerivedTopology() override { FinalizeParTopo(); }
++
+    // Mark all tets to ensure consistency across MPI tasks; also mark the shared
+    // and boundary triangle faces using the consistently marked tets.
+    void MarkTetMeshForRefinement(const DSTable &v_to_v) override;
+@@ -392,6 +395,10 @@ public:
+        See @a Mesh::MakeSimplicial for more details. */
+    static ParMesh MakeSimplicial(ParMesh &orig_mesh);
+ 
++   /** Finalize the mesh as Mesh::Finalize() does (the marking for refinement
++       is the same on all ranks), then delete the face neighbor data: the new
++       vertex orders of the elements change the orientations of their shared
++       faces. */
+    void Finalize(bool refine = false, bool fix_orientation = false) override;
+ 
+    void SetAttributes(bool elem_attrs_changed = true,
+@@ -710,7 +717,8 @@ public:
+    void GenerateBoundaryElements() override
+    { MFEM_ABORT("Generation of boundary elements works properly only on serial meshes."); }
+ 
+-   /// See the remarks for the serial version in mesh.hpp
++   /// See the remarks for the serial version in mesh.hpp. Also deletes the
++   /// face neighbor data, which the new vertex orders make out of date.
+    MFEM_DEPRECATED void ReorientTetMesh() override;
+ 
+    /// Utility function: sum integers from all processors (Allreduce).
+diff --git a/mesh/tetrahedron.cpp b/mesh/tetrahedron.cpp
+index 2d7b243afa257345d7ae9b2cf26fefc550c04a75..3455213a65b80f047d21e6489a3aa5f02e828d2c 100644
+--- a/mesh/tetrahedron.cpp
++++ b/mesh/tetrahedron.cpp
+@@ -13,6 +13,8 @@
+ 
+ #include "mesh_headers.hpp"
+ 
++#include <array>
++
+ namespace mfem
+ {
+ 
+@@ -185,19 +187,36 @@ void Tetrahedron::SetVertices(const int *ind)
+    }
+ }
+ 
+-void Tetrahedron::MarkEdge(const DSTable &v_to_v, const int *length)
++template <typename T1, typename T2>
++void Tetrahedron::MarkEdge(const DSTable &v_to_v, const Array<T1> &length,
++                           const Array<T2> &length2)
+ {
+-   int ind[4], i, j, l, L, type;
+-
+-   // determine the longest edge
+-   L = length[v_to_v(indices[0], indices[1])]; j = 0;
+-   if ((l = length[v_to_v(indices[1], indices[2])]) > L) { L = l; j = 1; }
+-   if ((l = length[v_to_v(indices[2], indices[0])]) > L) { L = l; j = 2; }
+-   if ((l = length[v_to_v(indices[0], indices[3])]) > L) { L = l; j = 3; }
+-   if ((l = length[v_to_v(indices[1], indices[3])]) > L) { L = l; j = 4; }
+-   if ((l = length[v_to_v(indices[2], indices[3])]) > L) { j = 5; }
++   int e, j, ind[4], type;
++   T1 l, L;
++   T2 l2, L2;
++   // The edges are ordered by their lengths, and edges of equal length by
++   // length2: a strict total order, so that the longest edge of a face is the
++   // same whatever the order in which its edges are compared (here and in
++   // Triangle::MarkEdge()). A tolerance on the lengths would not be transitive.
++   auto Compare = [&length, &length2, &l, &l2, &L, &L2](int edge)
++   {
++      l = length[edge];
++      l2 = length2[edge];
++      MFEM_ASSERT(l2 != L2, "Tie-breaking lengths should be unique for MarkEdge");
++      return (l > L || (l == L && l2 > L2));
++   };
++
++   // Find j as the index of the longest edge, using the pair of metrics
++   e = v_to_v(indices[0], indices[1]);
++   L = length[e]; L2 = length2[e];
++   j = 0;
++   if (Compare(v_to_v(indices[1], indices[2]))) { L = l; L2 = l2; j = 1; }
++   if (Compare(v_to_v(indices[2], indices[0]))) { L = l; L2 = l2; j = 2; }
++   if (Compare(v_to_v(indices[0], indices[3]))) { L = l; L2 = l2; j = 3; }
++   if (Compare(v_to_v(indices[1], indices[3]))) { L = l; L2 = l2; j = 4; }
++   if (Compare(v_to_v(indices[2], indices[3]))) { j = 5; }
+ 
+-   for (i = 0; i < 4; i++)
++   for (int i = 0; i < 4; i++)
+    {
+       ind[i] = indices[i];
+    }
+@@ -226,16 +245,17 @@ void Tetrahedron::MarkEdge(const DSTable &v_to_v, const int *length)
+          break;
+    }
+ 
+-   // Determine the two longest edges for the other two faces and
+-   // store them in ind[0] and ind[1]
++   // Determine the two longest edges for the other two faces and store them in
++   // ind[0] and ind[1]
+    ind[0] = 2; ind[1] = 1;
+-   L = length[v_to_v(indices[0], indices[2])];
+-   if ((l = length[v_to_v(indices[0], indices[3])]) > L) { L = l; ind[0] = 3; }
+-   if ((l = length[v_to_v(indices[2], indices[3])]) > L) { ind[0] = 5; }
+ 
+-   L = length[v_to_v(indices[1], indices[2])];
+-   if ((l = length[v_to_v(indices[1], indices[3])]) > L) { L = l; ind[1] = 4; }
+-   if ((l = length[v_to_v(indices[2], indices[3])]) > L) { ind[1] = 5; }
++   e = v_to_v(indices[0], indices[2]); L = length[e]; L2 = length2[e];
++   if (Compare(v_to_v(indices[0], indices[3]))) { L = l; L2 = l2; ind[0] = 3; }
++   if (Compare(v_to_v(indices[2], indices[3]))) { L = l; L2 = l2; ind[0] = 5; }
++
++   e = v_to_v(indices[1], indices[2]); L = length[e]; L2 = length2[e];
++   if (Compare(v_to_v(indices[1], indices[3]))) { L = l; L2 = l2; ind[1] = 4; }
++   if (Compare(v_to_v(indices[2], indices[3]))) { L = l; L2 = l2; ind[1] = 5; }
+ 
+    j = 0;
+    switch (ind[0])
+@@ -349,4 +369,11 @@ Element *Tetrahedron::Duplicate(Mesh *m) const
+    return tet;
+ }
+ 
++// @cond DOXYGEN_SKIP
++
++template void Tetrahedron::MarkEdge(const DSTable &, const Array<real_t> &,
++                                    const Array<std::array<real_t, 3>> &);
++
++// @endcond
++
+ }
+diff --git a/mesh/tetrahedron.hpp b/mesh/tetrahedron.hpp
+index 5b4e8d9ab0d2395e2f23b1a1cdd7d84241035b77..b303deef5c85a7110db744b18b4491f23c47b8cb 100644
+--- a/mesh/tetrahedron.hpp
++++ b/mesh/tetrahedron.hpp
+@@ -71,10 +71,15 @@ public:
+    /// Return 1 if the element needs refinement in order to get conforming mesh.
+    int NeedRefinement(HashTable<Hashed2> &v_to_v) const override;
+ 
+-   /** Reorder the vertices so that the longest edge is from vertex 0
+-       to vertex 1. If called it should be once from the mesh constructor,
+-       because the order may be used later for setting the edges. **/
+-   void MarkEdge(const DSTable &v_to_v, const int *length) override;
++   /** Reorder the vertices so that the edge from vertex 0 to vertex 1 is the
++       longest, and set the refinement flag from the longest edges of the other
++       faces: the largest @a length, then the largest @a length2 (keys that
++       differ for the edges of a tetrahedron), both indexed by the edge numbers
++       of @a v_to_v. Defined for @a T1 = real_t, @a T2 = std::array<real_t, 3>.
++       **/
++   template <typename T1, typename T2>
++   void MarkEdge(const DSTable &v_to_v, const Array<T1> &length,
++                 const Array<T2> &length2);
+ 
+    void ResetTransform(int tr) override { transform = tr; }
+    unsigned GetTransform() const override { return transform; }
+diff --git a/mesh/triangle.cpp b/mesh/triangle.cpp
+index c45ab64c916c545e67b776ff86054a931e93c3b3..558a920bf96cb0daba08f9896cce0318d166bea9 100644
+--- a/mesh/triangle.cpp
++++ b/mesh/triangle.cpp
+@@ -11,6 +11,8 @@
+ 
+ #include "mesh_headers.hpp"
+ 
++#include <array>
++
+ namespace mfem
+ {
+ 
+@@ -50,63 +52,35 @@ void Triangle::SetVertices(const int *ind)
+    }
+ }
+ 
+-void Triangle::MarkEdge(DenseMatrix &pmat)
++// static method
++template <typename T1, typename T2>
++void Triangle::MarkEdge(int indices[3], const DSTable &v_to_v,
++                        const Array<T1> &length, const Array<T2> &length2)
+ {
+-   real_t d[3];
+-   int shift, v;
+-
+-   d[0] = ( (pmat(0,1)-pmat(0,0))*(pmat(0,1)-pmat(0,0)) +
+-            (pmat(1,1)-pmat(1,0))*(pmat(1,1)-pmat(1,0)) );
+-   d[1] = ( (pmat(0,2)-pmat(0,1))*(pmat(0,2)-pmat(0,1)) +
+-            (pmat(1,2)-pmat(1,1))*(pmat(1,2)-pmat(1,1)) );
+-   d[2] = ( (pmat(0,2)-pmat(0,0))*(pmat(0,2)-pmat(0,0)) +
+-            (pmat(1,2)-pmat(1,0))*(pmat(1,2)-pmat(1,0)) );
+-
+-   // if pmat has 3 rows, then use extra term in each sum
+-   if (pmat.Height()==3)
+-   {
+-      d[0] += (pmat(2,1)-pmat(2,0))*(pmat(2,1)-pmat(2,0));
+-      d[1] += (pmat(2,2)-pmat(2,1))*(pmat(2,2)-pmat(2,1));
+-      d[2] += (pmat(2,2)-pmat(2,0))*(pmat(2,2)-pmat(2,0));
+-   }
+-
+-   if (d[0] >= d[1])
++   int e, j, ind[3];
++   T1 l, L;
++   T2 l2, L2;
++   // The edges are ordered by their lengths, and edges of equal length by
++   // length2: a strict total order, so that the longest edge of a face is the
++   // same whatever the order in which its edges are compared (here and in
++   // Tetrahedron::MarkEdge()). A tolerance on the lengths would not be
++   // transitive.
++   auto Compare = [&length, &length2, &l, &l2, &L, &L2](int edge)
+    {
+-      if (d[0] >= d[2]) { shift = 0; }
+-      else { shift = 2; }
+-   }
+-   else if (d[1] >= d[2]) { shift = 1; }
+-   else { shift = 2; }
+-
+-   switch (shift)
+-   {
+-      case 0:
+-         break;
+-      case 1:
+-         v = indices[0];
+-         indices[0] = indices[1];
+-         indices[1] = indices[2];
+-         indices[2] = v;
+-         break;
+-      case 2:
+-         v = indices[0];
+-         indices[0] = indices[2];
+-         indices[2] = indices[1];
+-         indices[1] = v;
+-         break;
+-   }
+-}
+-
+-// Static method
+-void Triangle::MarkEdge(int *indices, const DSTable &v_to_v, const int *length)
+-{
+-   int l, L, j, ind[3], i;
++      l = length[edge];
++      l2 = length2[edge];
++      MFEM_ASSERT(l2 != L2, "Tie-breaking lengths should be unique for MarkEdge");
++      return (l > L || (l == L && l2 > L2));
++   };
++
++   // Find j as the index of the longest edge, using the pair of metrics
++   e = v_to_v(indices[0], indices[1]);
++   L = length[e]; L2 = length2[e];
++   j = 0;
++   if (Compare(v_to_v(indices[1], indices[2]))) { L = l; L2 = l2; j = 1; }
++   if (Compare(v_to_v(indices[2], indices[0]))) { j = 2; }
+ 
+-   L = length[ v_to_v(indices[0], indices[1]) ]; j = 0;
+-   if ( (l = length[ v_to_v(indices[1], indices[2]) ]) > L ) { L = l; j = 1; }
+-   if ( (l = length[ v_to_v(indices[2], indices[0]) ]) > L ) { j = 2; }
+-
+-   for (i = 0; i < 3; i++)
++   for (int i = 0; i < 3; i++)
+    {
+       ind[i] = indices[i];
+    }
+@@ -197,4 +171,11 @@ void Triangle::SetVertices(const Array<int> &v)
+    std::copy(v.begin(), v.end(), indices);
+ }
+ 
++// @cond DOXYGEN_SKIP
++
++template void Triangle::MarkEdge(int *, const DSTable &, const Array<real_t> &,
++                                 const Array<std::array<real_t, 3>> &);
++
++// @endcond
++
+ } // namespace mfem
+diff --git a/mesh/triangle.hpp b/mesh/triangle.hpp
+index b6de7c6fc6905049cbda451c825151665e33f636..b88ad327621aacb077ba6ead98bb197b1cc70c8d 100644
+--- a/mesh/triangle.hpp
++++ b/mesh/triangle.hpp
+@@ -44,16 +44,20 @@ public:
+    /// Return 1 if the element needs refinement in order to get conforming mesh.
+    int NeedRefinement(HashTable<Hashed2> &v_to_v) const override;
+ 
+-   /** Reorder the vertices so that the longest edge is from vertex 0
+-       to vertex 1. If called it should be once from the mesh constructor,
+-       because the order may be used later for setting the edges. **/
+-   void MarkEdge(DenseMatrix & pmat);
+-
+-   static void MarkEdge(int *indices, const DSTable &v_to_v, const int *length);
+-
+-   /// Mark the longest edge by assuming/changing the order of the vertices.
+-   void MarkEdge(const DSTable &v_to_v, const int *length) override
+-   { MarkEdge(indices, v_to_v, length); }
++   /** Reorder the vertices so that the edge from vertex 0 to vertex 1 is the
++       longest: the largest @a length, then the largest @a length2 (keys that
++       differ for the edges of a triangle), both indexed by the edge numbers of
++       @a v_to_v. Defined for @a T1 = real_t, @a T2 = std::array<real_t, 3>.
++       **/
++   template <typename T1, typename T2>
++   void MarkEdge(const DSTable &v_to_v, const Array<T1> &length,
++                 const Array<T2> &length2)
++   { MarkEdge(indices, v_to_v, length, length2); }
++
++   /// MarkEdge() for the triangle of vertices @a indices.
++   template <typename T1, typename T2>
++   static void MarkEdge(int *indices, const DSTable &v_to_v,
++                        const Array<T1> &length, const Array<T2> &length2);
+ 
+    void ResetTransform(int tr) override { transform = tr; }
+    unsigned GetTransform() const override { return transform; }
+diff --git a/tests/unit/mesh/test_mesh.cpp b/tests/unit/mesh/test_mesh.cpp
+index da2326b009afc722de15c91ad148af715825c355..9487038aad2095e955fa3cd388d9c77a1bbb853c 100644
+--- a/tests/unit/mesh/test_mesh.cpp
++++ b/tests/unit/mesh/test_mesh.cpp
+@@ -12,6 +12,10 @@
+ #include "mfem.hpp"
+ #include "unit_tests.hpp"
+ 
++#include <algorithm>
++#include <cmath>
++#include <vector>
++
+ using namespace mfem;
+ 
+ TEST_CASE("Element-wise construction", "[Mesh]")
+@@ -68,6 +72,68 @@ TEST_CASE("Element-wise construction", "[Mesh]")
+    }
+ }
+ 
++TEST_CASE("Simplex meshes built and finalized marked by their longest edge",
++          "[Mesh]")
++{
++   // FinalizeTriMesh() and FinalizeTetMesh() on a mesh built element by
++   // element (as in ex7) mark its simplices for refinement: the edge between
++   // the local vertices 0 and 1 of each is its longest, and a tetrahedron has
++   // a refinement flag. A conforming refinement then bisects them, through
++   // their longest edge, and keeps their volume.
++   Mesh tri(2, 3, 1);
++   tri.AddVertex(0.0, 0.0);
++   tri.AddVertex(1.0, 0.0);
++   tri.AddVertex(0.0, 3.0);
++   tri.AddTriangle(0, 1, 2);
++   tri.FinalizeTriMesh(1, 1, true);
++   const int *v = tri.GetElement(0)->GetVertices();
++   CHECK(((v[0] == 1 && v[1] == 2) || (v[0] == 2 && v[1] == 1)));
++
++   Mesh tet(3, 4, 1);
++   tet.AddVertex(0.0, 0.0, 0.0);
++   tet.AddVertex(1.0, 0.0, 0.0);
++   tet.AddVertex(0.0, 2.0, 0.0);
++   tet.AddVertex(0.0, 0.0, 4.0);
++   tet.AddTet(0, 1, 2, 3);
++   tet.FinalizeTetMesh(1, 1, true);
++   const int *w = tet.GetElement(0)->GetVertices();
++   CHECK(((w[0] == 2 && w[1] == 3) || (w[0] == 3 && w[1] == 2)));
++   const Tetrahedron *t = dynamic_cast<const Tetrahedron *>(tet.GetElement(0));
++   REQUIRE(t != nullptr);
++   CHECK(t->GetRefinementFlag() != 0);
++
++   // The midpoints of the longest edges, and the volumes.
++   const real_t mid[2][3] = {{0.5, 1.5, 0.0}, {0.0, 1.0, 2.0}};
++   const real_t volume[2] = {1.5, 4.0/3.0};
++   int m = 0;
++   for (Mesh *mesh : {&tri, &tet})
++   {
++      Array<int> marked(1);
++      marked[0] = 0;
++      mesh->GeneralRefinement(marked, 0);
++      CHECK(mesh->GetNE() > 1);
++      bool found = false;
++      for (int i = 0; i < mesh->GetNV(); i++)
++      {
++         const real_t *x = mesh->GetVertex(i);
++         real_t d = 0.0;
++         for (int k = 0; k < mesh->SpaceDimension(); k++)
++         {
++            d += (x[k] - mid[m][k])*(x[k] - mid[m][k]);
++         }
++         found = found || (d < 1e-24);
++      }
++      CHECK(found);
++      real_t vol = 0.0;
++      for (int e = 0; e < mesh->GetNE(); e++)
++      {
++         vol += mesh->GetElementVolume(e);
++      }
++      CHECK((vol - volume[m])*(vol - volume[m]) < 1e-24);
++      m++;
++   }
++}
++
+ TEST_CASE("Gecko integration in MFEM", "[Mesh]")
+ {
+    Array<int> perm;
+@@ -568,3 +634,308 @@ TEST_CASE("Mesh::Swap preserves named attribute sets", "[Mesh]")
+    REQUIRE(a_bdr_result == b_bdr_attrs);
+    REQUIRE(b_bdr_result == a_bdr_attrs);
+ }
++
++TEST_CASE("Tetrahedron and boundary triangle marked alike", "[Mesh]")
++{
++   // One tetrahedron, with a boundary triangle on each face. The edges of the
++   // face 0-1-2 have squared lengths 1, 1 + 0.6e-6 and 1 + 1.2e-6: a
++   // comparison with a relative tolerance of 1e-6 would take the first two
++   // and the last two as equal, but not the first and the last, and its
++   // result would depend on the order of the comparisons. Whatever the vertex
++   // order of the tetrahedron and of the triangles, the refinement edge of
++   // each boundary triangle must be the marked edge of its face in the
++   // tetrahedron, so that the mesh can be refined.
++   const real_t x = 0.5 - 0.3e-6;
++   const real_t y = std::sqrt(1.0 + 0.6e-6 - x*x);
++   const real_t p[4][3] = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {x, y, 0.0},
++      {0.5, 0.3, 0.8}
++   };
++   int tv[4] = {0, 1, 2, 3};
++   int perms = 0, bad = 0;
++   do
++   {
++      for (int rot = 0; rot < 3; rot++)
++      {
++         Mesh mesh(3, 4, 1, 4);
++         for (int v = 0; v < 4; v++) { mesh.AddVertex(p[v]); }
++         mesh.AddTet(tv);
++         for (int f = 0; f < 4; f++)
++         {
++            const int *fv =
++               Geometry::Constants<Geometry::TETRAHEDRON>::FaceVert[f];
++            int bv[3];
++            for (int k = 0; k < 3; k++) { bv[k] = tv[fv[(k + rot) % 3]]; }
++            mesh.AddBdrTriangle(bv, 1 + f);
++         }
++         mesh.FinalizeTopology();
++         mesh.Finalize(true);
++         const Tetrahedron *tet =
++            static_cast<const Tetrahedron *>(mesh.GetElement(0));
++         Array<int> faces, ori;
++         mesh.GetElementFaces(0, faces, ori);
++         for (int b = 0; b < mesh.GetNBE(); b++)
++         {
++            const int *bv = mesh.GetBdrElement(b)->GetVertices();
++            const int j = faces.Find(mesh.GetBdrElementFaceIndex(b));
++            REQUIRE(j >= 0);
++            int mv[3];
++            tet->GetMarkedFace(j, mv);
++            const bool same = (bv[0] == mv[0] && bv[1] == mv[1]) ||
++                              (bv[0] == mv[1] && bv[1] == mv[0]);
++            bad += !same;
++         }
++         // Refine (three bisections), which needs the two to agree.
++         Array<int> marked(1);
++         marked[0] = 0;
++         mesh.GeneralRefinement(marked, 0);
++         CHECK(mesh.GetNE() == 8);
++         perms++;
++      }
++   }
++   while (std::next_permutation(tv, tv + 4));
++   INFO(bad << " boundary triangles marked differently, in " << perms
++        << " vertex orders");
++   CHECK(bad == 0);
++}
++
++TEST_CASE("Uniform refinement after a local refinement of a curved mesh",
++          "[Mesh]")
++{
++   // Uniform refinement takes the point matrices of the children from static
++   // arrays, and local refinement computes its own: it must not write them
++   // over the static arrays, which the next uniform refinements use for the
++   // nodes of curved meshes. The point matrices of a local refinement that
++   // refines few elements, here none, fit in these arrays. Straight nodes of
++   // order 2 must keep the measure of the unit square or cube.
++   const int dim = GENERATE(2, 3);
++   Mesh mesh = (dim == 2) ?
++               Mesh::MakeCartesian2D(2, 2, Element::TRIANGLE) :
++               Mesh::MakeCartesian3D(2, 2, 2, Element::TETRAHEDRON);
++   mesh.SetCurvature(2);
++   auto Measure = [&mesh]()
++   {
++      real_t measure = 0.0;
++      for (int e = 0; e < mesh.GetNE(); e++)
++      {
++         measure += mesh.GetElementVolume(e);
++      }
++      return measure;
++   };
++   for (int pass = 0; pass < 2; pass++)
++   {
++      mesh.UniformRefinement();
++      CHECK(std::abs(Measure() - 1.0) < 1e-12);
++      mesh.Finalize(true);
++      Array<int> none;
++      mesh.GeneralRefinement(none, 0);
++      CHECK(std::abs(Measure() - 1.0) < 1e-12);
++   }
++}
++
++namespace
++{
++
++/// The number of elements whose marked edge, between their local vertices 0
++/// and 1, is shorter than one of their other edges by more than round-off.
++/// The lengths are those of the chords between the vertices as mapped by each
++/// element.
++int MarkedNotLongest(const Mesh &mesh)
++{
++   int n = 0;
++   IsoparametricTransformation T;
++   DenseMatrix x;
++   for (int e = 0; e < mesh.GetNE(); e++)
++   {
++      const Element *el = mesh.GetElement(e);
++      mesh.GetElementTransformation(e, &T);
++      T.Transform(*Geometries.GetVertices(el->GetGeometryType()), x);
++      real_t longest = 0.0, marked = 0.0;
++      for (int k = 0; k < el->GetNEdges(); k++)
++      {
++         const int *ev = el->GetEdgeVertices(k);
++         real_t l = 0.0;
++         for (int d = 0; d < x.Height(); d++)
++         {
++            l += (x(d, ev[0]) - x(d, ev[1]))*(x(d, ev[0]) - x(d, ev[1]));
++         }
++         longest = std::max(longest, l);
++         if (ev[0] + ev[1] == 1) { marked = l; }
++      }
++      n += (marked < longest*(1.0 - 1e-12));
++   }
++   return n;
++}
++
++} // namespace
++
++TEST_CASE("Triangle with discontinuous nodes marked by its longest edge",
++          "[Mesh]")
++{
++   // Discontinuous (L2) nodes have no vertex DOFs: the lengths of the edges
++   // come from the elements. A triangle with sides of lengths 100, 1 and
++   // about 100.005 is marked by its longest side, also when Finalize() first
++   // fixes its orientation, which its nodes must then follow.
++   const bool inverted = GENERATE(false, true);
++   INFO((inverted ? "inverted" : "positive") << " triangle");
++   Mesh mesh(2, 3, 1);
++   mesh.AddVertex(0.0, 0.0);
++   mesh.AddVertex(100.0, 0.0);
++   mesh.AddVertex(inverted ? 100.0 : 0.0, inverted ? -1.0 : 1.0);
++   mesh.AddTriangle(0, 1, 2);
++   mesh.FinalizeTopology();
++   mesh.SetCurvature(2, true);
++   mesh.Finalize(true, true);
++   CHECK(MarkedNotLongest(mesh) == 0);
++   CHECK(std::abs(mesh.GetElementVolume(0) - 50.0) < 1e-10);
++}
++
++TEST_CASE("Mesh with discontinuous nodes marked as without nodes", "[Mesh]")
++{
++   // Straight discontinuous nodes give the vertices their positions in every
++   // element: marked again, the mesh is marked as the same mesh without
++   // nodes. Its vertices are moved so that no two edges have the same length.
++   const int dim = GENERATE(2, 3);
++   const int order = GENERATE(1, 2);
++   INFO(dim << "D, nodes of order " << order);
++   auto Make = [dim]()
++   {
++      Mesh mesh = (dim == 2) ?
++                  Mesh::MakeCartesian2D(4, 4, Element::TRIANGLE) :
++                  Mesh::MakeCartesian3D(3, 3, 3, Element::TETRAHEDRON);
++      for (int v = 0; v < mesh.GetNV(); v++)
++      {
++         real_t *x = mesh.GetVertex(v);
++         for (int d = 0; d < dim; d++)
++         {
++            x[d] += 0.02*std::sin(12.9898*v + 78.233*d);
++         }
++      }
++      return mesh;
++   };
++   Mesh plain = Make(), nodal = Make();
++   nodal.SetCurvature(order, true);
++   plain.Finalize(true);
++   nodal.Finalize(true);
++   REQUIRE(plain.GetNE() == nodal.GetNE());
++   REQUIRE(plain.GetNBE() == nodal.GetNBE());
++   auto Same = [](const Element *a, const Element *b)
++   {
++      const int n = a->GetNVertices();
++      return std::equal(a->GetVertices(), a->GetVertices() + n,
++                        b->GetVertices());
++   };
++   int differ = 0;
++   for (int e = 0; e < plain.GetNE(); e++)
++   {
++      differ += !Same(plain.GetElement(e), nodal.GetElement(e));
++   }
++   for (int b = 0; b < plain.GetNBE(); b++)
++   {
++      differ += !Same(plain.GetBdrElement(b), nodal.GetBdrElement(b));
++   }
++   CHECK(differ == 0);
++   CHECK(MarkedNotLongest(nodal) == 0);
++}
++
++TEST_CASE("Periodic meshes marked by the longest edge of each element",
++          "[Mesh]")
++{
++   // The nodes of a periodic mesh are discontinuous: a vertex on a periodic
++   // boundary has a position in each of its elements. The cells are long in
++   // one direction, so that the longest edge of each element is longer than
++   // the others by much more than round-off. Marked again, each element is
++   // marked by its longest edge.
++   const int dim = GENERATE(2, 3);
++   INFO(dim << "D");
++   Mesh base = (dim == 2) ?
++               Mesh::MakeCartesian2D(4, 3, Element::TRIANGLE, false, 1.0, 9.0) :
++               Mesh::MakeCartesian3D(3, 3, 3, Element::TETRAHEDRON, 1.0, 4.0,
++                                     13.0);
++   std::vector<Vector> translations;
++   for (int d = 0; d < dim; d++)
++   {
++      Vector t(dim);
++      t = 0.0;
++      t(d) = (d == 0) ? 1.0 : (d == 1) ? ((dim == 2) ? 9.0 : 4.0) : 13.0;
++      translations.push_back(t);
++   }
++   Mesh mesh = Mesh::MakePeriodic(
++                  base, base.CreatePeriodicVertexMapping(translations));
++   mesh.Finalize(true);
++   CHECK(MarkedNotLongest(mesh) == 0);
++}
++
++TEST_CASE("Inverted tetrahedra with discontinuous nodes marked by their "
++          "lengths", "[Mesh]")
++{
++   // Finalize() fixes the orientation of inverted tetrahedra before it marks
++   // them, and the marking reads discontinuous nodes through the elements: the
++   // nodes must follow the fixed vertex orders. Half of the tetrahedra of a
++   // mesh with moved vertices are inverted (two of their vertices swapped).
++   // With discontinuous nodes of orders 1 and 2, the mesh is fixed and marked
++   // as the same mesh without nodes, every tetrahedron is marked by its
++   // longest edge, none is inverted any more, and the nodes map the vertices
++   // of each tetrahedron to their coordinates.
++   const int order = GENERATE(1, 2);
++   INFO("nodes of order " << order);
++   auto Make = []()
++   {
++      Mesh mesh = Mesh::MakeCartesian3D(3, 3, 3, Element::TETRAHEDRON);
++      for (int v = 0; v < mesh.GetNV(); v++)
++      {
++         real_t *x = mesh.GetVertex(v);
++         for (int d = 0; d < 3; d++)
++         {
++            x[d] += 0.02*std::sin(12.9898*v + 78.233*d);
++         }
++      }
++      for (int e = 0; e < mesh.GetNE(); e += 2)
++      {
++         int *v = mesh.GetElement(e)->GetVertices();
++         std::swap(v[2], v[3]);
++      }
++      return mesh;
++   };
++   Mesh plain = Make(), nodal = Make();
++   nodal.SetCurvature(order, true);
++   REQUIRE(nodal.CheckElementOrientation(false) == nodal.GetNE()/2);
++   plain.Finalize(true, true);
++   nodal.Finalize(true, true);
++   REQUIRE(plain.GetNE() == nodal.GetNE());
++   REQUIRE(plain.GetNBE() == nodal.GetNBE());
++   auto Same = [](const Element *a, const Element *b)
++   {
++      const int n = a->GetNVertices();
++      return std::equal(a->GetVertices(), a->GetVertices() + n,
++                        b->GetVertices());
++   };
++   int differ = 0;
++   for (int e = 0; e < plain.GetNE(); e++)
++   {
++      differ += !Same(plain.GetElement(e), nodal.GetElement(e));
++   }
++   for (int b = 0; b < plain.GetNBE(); b++)
++   {
++      differ += !Same(plain.GetBdrElement(b), nodal.GetBdrElement(b));
++   }
++   CHECK(differ == 0);
++   CHECK(MarkedNotLongest(nodal) == 0);
++   CHECK(nodal.CheckElementOrientation(false) == 0);
++   real_t gap = 0.0;
++   IsoparametricTransformation T;
++   DenseMatrix x;
++   for (int e = 0; e < nodal.GetNE(); e++)
++   {
++      nodal.GetElementTransformation(e, &T);
++      T.Transform(*Geometries.GetVertices(Geometry::TETRAHEDRON), x);
++      const int *v = nodal.GetElement(e)->GetVertices();
++      for (int k = 0; k < 4; k++)
++      {
++         for (int d = 0; d < 3; d++)
++         {
++            gap = std::max(gap, std::abs(x(d, k) - plain.GetVertex(v[k])[d]));
++         }
++      }
++   }
++   CHECK(gap < 1e-12);
++}
+diff --git a/tests/unit/mesh/test_pmesh.cpp b/tests/unit/mesh/test_pmesh.cpp
+index feec325f9caed4abbe9e6930ef531f90dabd8a9d..ab6161602dfccfd37c061b9e66b0e27854472c6f 100644
+--- a/tests/unit/mesh/test_pmesh.cpp
++++ b/tests/unit/mesh/test_pmesh.cpp
+@@ -9,6 +9,14 @@
+ // terms of the BSD-3 license. We welcome feedback and contributions, see file
+ // CONTRIBUTING.md for details.
+ 
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++#include <exception>
++#include <functional>
++#include <limits>
++#include <vector>
++
+ #include "mfem.hpp"
+ #include "unit_tests.hpp"
+ 
+@@ -223,6 +231,899 @@ TEST_CASE("ParMeshMakeSimplicial", "[Parallel], [ParMesh]")
+    REQUIRE(x.Normlinf() == MFEM_Approx(0.0));
+ }
+ 
++namespace tet_marking
++{
++
++/// Prisms over equilateral triangles (a sheared Cartesian mesh of n^3 wedges),
++/// split into tetrahedra and marked: their horizontal faces have three edges
++/// of the same length, so their marking depends on the order of the edges.
++Mesh EquilateralPrisms(int n)
++{
++   Mesh wedges = Mesh::MakeCartesian3D(n, n, n, Element::WEDGE);
++   for (int v = 0; v < wedges.GetNV(); v++)
++   {
++      real_t *x = wedges.GetVertex(v);
++      x[0] -= 0.5*x[1];
++      x[1] *= std::sqrt(0.75);
++   }
++   Mesh mesh = Mesh::MakeSimplicial(wedges);
++   mesh.Finalize(true);
++   return mesh;
++}
++
++/// Check that the members of each group list the same shared edges and
++/// triangles, in the same order and with the same vertex order (for the
++/// triangles, their marked edge first): the master broadcasts the global
++/// vertex numbers of its entities, the others compare. The sizes of the lists
++/// are compared first.
++bool SharedEntitiesAgree(ParMesh &pmesh)
++{
++   H1_FECollection h1(1, pmesh.Dimension());
++   ParFiniteElementSpace fes(&pmesh, &h1);
++   fes.Dof_TrueDof_Matrix();
++   const int ng = pmesh.GetNGroups();
++   auto Compare = [&](const std::function<void(int, std::vector<int> &)> &fill)
++   {
++      GroupCommunicator gc(pmesh.gtopo);
++      Table &group_ldof = gc.GroupLDofTable();
++      std::vector<std::vector<int>> per_group(ng);
++      group_ldof.MakeI(ng);
++      for (int g = 1; g < ng; g++)
++      {
++         fill(g, per_group[g]);
++         group_ldof.AddColumnsInRow(g, static_cast<int>(per_group[g].size()));
++      }
++      group_ldof.MakeJ();
++      Array<int> values;
++      for (int g = 1; g < ng; g++)
++      {
++         for (int x : per_group[g])
++         {
++            group_ldof.AddConnection(g, values.Size());
++            values.Append(x);
++         }
++      }
++      group_ldof.ShiftUpI();
++      gc.Finalize();
++      Array<int> master(values);
++      gc.Bcast(master);
++      int ok = 1;
++      for (int k = 0; k < values.Size(); k++)
++      {
++         ok &= (values[k] == master[k]);
++      }
++      MPI_Allreduce(MPI_IN_PLACE, &ok, 1, MPI_INT, MPI_LAND, pmesh.GetComm());
++      return bool(ok);
++   };
++   const bool same_sizes = Compare([&](int g, std::vector<int> &x)
++   {
++      x = {pmesh.GroupNVertices(g), pmesh.GroupNEdges(g),
++           pmesh.GroupNTriangles(g)
++          };
++   });
++   if (!same_sizes) { return false; }
++   auto Id = [&](int v)
++   {
++      return static_cast<int>(fes.GetGlobalTDofNumber(v));
++   };
++   return Compare([&](int g, std::vector<int> &x)
++   {
++      Array<int> v;
++      for (int i = 0; i < pmesh.GroupNVertices(g); i++)
++      {
++         x.push_back(Id(pmesh.GroupVertex(g, i)));
++      }
++      for (int i = 0; i < pmesh.GroupNEdges(g); i++)
++      {
++         int edge, o;
++         pmesh.GroupEdge(g, i, edge, o);
++         pmesh.GetEdgeVertices(edge, v);
++         if (o < 0) { std::swap(v[0], v[1]); }
++         for (int vi : v) { x.push_back(Id(vi)); }
++      }
++      for (int i = 0; i < pmesh.GroupNTriangles(g); i++)
++      {
++         int face, o;
++         pmesh.GroupTriangle(g, i, face, o);
++         pmesh.GetFaceVertices(face, v);
++         int sv[3];
++         const int *perm = Geometry::Constants<Geometry::TRIANGLE>::Orient[o];
++         for (int j = 0; j < 3; j++) { sv[perm[j]] = v[j]; }
++         for (int j = 0; j < 3; j++) { x.push_back(Id(sv[j])); }
++      }
++   });
++}
++
++/// Refine conformally the elements whose center has x < 0.5.
++void RefineLeftHalf(ParMesh &pmesh)
++{
++   Array<int> marked;
++   Vector c;
++   for (int e = 0; e < pmesh.GetNE(); e++)
++   {
++      pmesh.GetElementCenter(e, c);
++      if (c(0) < 0.5) { marked.Append(e); }
++   }
++   pmesh.GeneralRefinement(marked, 0);
++}
++
++/// A mesh of tetrahedra, marked: prisms over equilateral triangles, or a
++/// Cartesian mesh of 4^3 cubes split into tetrahedra; with its vertices moved
++/// by up to a fraction of the edge length (its edges of equal length then
++/// become nearly equal), and nodes of the given order, straight or deformed.
++Mesh TetMesh(bool prisms, real_t perturbation, int order, bool deform)
++{
++   Mesh mesh = prisms ? EquilateralPrisms(4) :
++               Mesh::MakeCartesian3D(4, 4, 4, Element::TETRAHEDRON);
++   for (int v = 0; v < mesh.GetNV(); v++)
++   {
++      real_t *x = mesh.GetVertex(v);
++      for (int d = 0; d < 3; d++)
++      {
++         x[d] += 0.25*perturbation*std::sin(12.9898*v + 78.233*d);
++      }
++   }
++   mesh.Finalize(true);
++   if (order > 0) { mesh.SetCurvature(order); }
++   if (deform)
++   {
++      mesh.Transform([](const Vector &x, Vector &y)
++      {
++         y = x;
++         y(0) += 0.03*std::sin(3.0*x(1)) + 0.02*x(0)*x(2);
++         y(1) += 0.02*std::cos(2.0*x(0));
++         y(2) += 0.01*std::sin(2.0*x(0) + x(1));
++      });
++   }
++   return mesh;
++}
++
++/// Check, on each rank, that the two marked tetrahedra of each face mark the
++/// same edge on it, and that the refinement edge of each boundary triangle is
++/// the marked edge of its face in the adjacent tetrahedron, if marked.
++bool LocalFacesAgree(ParMesh &pmesh)
++{
++   auto Marked = [&pmesh](int e) -> const Tetrahedron *
++   {
++      auto tet = static_cast<const Tetrahedron *>(pmesh.GetElement(e));
++      return tet->GetRefinementFlag() ? tet : nullptr;
++   };
++   auto SameEdge = [](const int *a, const int *b)
++   {
++      return (a[0] == b[0] && a[1] == b[1]) || (a[0] == b[1] && a[1] == b[0]);
++   };
++   int ok = 1;
++   for (int f = 0; f < pmesh.GetNumFaces(); f++)
++   {
++      int e[2], inf[2], mv[2][3], n = 0;
++      pmesh.GetFaceElements(f, &e[0], &e[1]);
++      pmesh.GetFaceInfos(f, &inf[0], &inf[1]);
++      for (int k = 0; k < 2; k++)
++      {
++         const Tetrahedron *tet = (e[k] >= 0) ? Marked(e[k]) : nullptr;
++         if (tet) { tet->GetMarkedFace(inf[k]/64, mv[n++]); }
++      }
++      if (n == 2) { ok &= SameEdge(mv[0], mv[1]); }
++   }
++   for (int b = 0; b < pmesh.GetNBE(); b++)
++   {
++      int e, inf, mv[3];
++      pmesh.GetBdrElementAdjacentElement(b, e, inf);
++      const Tetrahedron *tet = Marked(e);
++      if (!tet) { continue; }
++      tet->GetMarkedFace(inf/64, mv);
++      ok &= SameEdge(pmesh.GetBdrElement(b)->GetVertices(), mv);
++   }
++   MPI_Allreduce(MPI_IN_PLACE, &ok, 1, MPI_INT, MPI_LAND, pmesh.GetComm());
++   return bool(ok);
++}
++
++/// The largest change of a smooth field interpolated in the space when the
++/// values of its shared dofs are replaced by those of their owners: round-off
++/// if the space is conforming.
++real_t ConformityError(ParMesh &pmesh, const FiniteElementCollection &fec)
++{
++   VectorFunctionCoefficient u(3, [](const Vector &x, Vector &y)
++   {
++      y(0) = 1.0 + x(1)*x(2);
++      y(1) = 2.0 - x(0)*x(2);
++      y(2) = 3.0 + x(0)*x(1);
++   });
++   ParFiniteElementSpace fes(&pmesh, &fec);
++   ParGridFunction x(&fes), y(&fes);
++   x.ProjectCoefficient(u);
++   Vector t(fes.GetTrueVSize());
++   x.GetTrueDofs(t);
++   y.SetFromTrueDofs(t);
++   y -= x;
++   real_t err = y.Normlinf();
++   MPI_Allreduce(MPI_IN_PLACE, &err, 1, MPITypeMap<real_t>::mpi_type, MPI_MAX,
++                 pmesh.GetComm());
++   return err;
++}
++
++/// Check that ND and RT spaces of orders 1 and 2 are conforming.
++bool NDAndRTConforming(ParMesh &pmesh)
++{
++   real_t err = 0.0;
++   for (int p = 1; p <= 2; p++)
++   {
++      ND_FECollection nd(p, 3);
++      RT_FECollection rt(p - 1, 3);
++      err = std::max({err, ConformityError(pmesh, nd),
++                      ConformityError(pmesh, rt)});
++   }
++   return err < 1e-10;
++}
++
++/// Refine conformally the elements whose center is closer than r to p.
++void RefineNear(Mesh &mesh, const Vector &p, real_t r)
++{
++   Array<int> marked;
++   Vector c;
++   for (int e = 0; e < mesh.GetNE(); e++)
++   {
++      mesh.GetElementCenter(e, c);
++      if (c.DistanceTo(p) < r) { marked.Append(e); }
++   }
++   mesh.GeneralRefinement(marked, 0);
++}
++
++/// The elements of @a mesh, each as the positions of its vertices in their
++/// order (its marked edge first) and, for a tetrahedron, its refinement flag;
++/// of all the ranks of a ParMesh; sorted: the same for the same mesh, whatever
++/// its partition and its numbering. The positions are those the marking uses:
++/// the vertex coordinates, the vertex DOFs of the nodes, or, for nodes without
++/// vertex DOFs, the images of the reference vertices by the element.
++std::vector<std::vector<real_t>> Description(Mesh &mesh)
++{
++   const int sdim = mesh.SpaceDimension(), dim = mesh.Dimension();
++   const int len = (dim + 1)*sdim + (dim == 3 ? 1 : 0);
++   const GridFunction *nodes = mesh.GetNodes();
++   const FiniteElementSpace *fes = nodes ? nodes->FESpace() : nullptr;
++   std::vector<real_t> flat;
++   Array<int> vdofs;
++   DenseMatrix x;
++   for (int e = 0; e < mesh.GetNE(); e++)
++   {
++      const Element *el = mesh.GetElement(e);
++      const int *v = el->GetVertices();
++      if (fes && fes->GetNVDofs() == 0)
++      {
++         mesh.GetElementTransformation(e)->Transform(
++            *Geometries.GetVertices(el->GetGeometryType()), x);
++      }
++      for (int k = 0; k < dim + 1; k++)
++      {
++         for (int d = 0; d < sdim; d++)
++         {
++            if (!fes) { flat.push_back(mesh.GetVertex(v[k])[d]); }
++            else if (fes->GetNVDofs() == 0) { flat.push_back(x(d, k)); }
++            else
++            {
++               fes->GetVertexVDofs(v[k], vdofs);
++               flat.push_back((*nodes)(vdofs[d]));
++            }
++         }
++      }
++      if (dim == 3)
++      {
++         const Tetrahedron *t = static_cast<const Tetrahedron *>(el);
++         flat.push_back(t->GetRefinementFlag());
++      }
++   }
++   ParMesh *pmesh = dynamic_cast<ParMesh *>(&mesh);
++   if (pmesh)
++   {
++      MPI_Comm comm = pmesh->GetComm();
++      int n = static_cast<int>(flat.size()), nranks;
++      MPI_Comm_size(comm, &nranks);
++      std::vector<int> counts(nranks), offsets(nranks + 1, 0);
++      MPI_Allgather(&n, 1, MPI_INT, counts.data(), 1, MPI_INT, comm);
++      for (int r = 0; r < nranks; r++)
++      {
++         offsets[r+1] = offsets[r] + counts[r];
++      }
++      std::vector<real_t> all(offsets[nranks]);
++      const MPI_Datatype type = MPITypeMap<real_t>::mpi_type;
++      MPI_Allgatherv(flat.data(), n, type, all.data(), counts.data(),
++                     offsets.data(), type, comm);
++      flat.swap(all);
++   }
++   std::vector<std::vector<real_t>> d;
++   for (std::size_t i = 0; i < flat.size(); i += len)
++   {
++      d.emplace_back(flat.begin() + i, flat.begin() + i + len);
++   }
++   std::sort(d.begin(), d.end());
++   return d;
++}
++
++/// The number of elements, on all the ranks, whose marked edge, between their
++/// local vertices 0 and 1, is shorter than one of their other edges by more
++/// than round-off. The lengths are those of the chords between the vertices
++/// as mapped by each element.
++int MarkedNotLongest(ParMesh &pmesh)
++{
++   int n = 0;
++   IsoparametricTransformation T;
++   DenseMatrix x;
++   for (int e = 0; e < pmesh.GetNE(); e++)
++   {
++      const Element *el = pmesh.GetElement(e);
++      pmesh.GetElementTransformation(e, &T);
++      T.Transform(*Geometries.GetVertices(el->GetGeometryType()), x);
++      real_t longest = 0.0, marked = 0.0;
++      for (int k = 0; k < el->GetNEdges(); k++)
++      {
++         const int *ev = el->GetEdgeVertices(k);
++         real_t l = 0.0;
++         for (int d = 0; d < x.Height(); d++)
++         {
++            l += (x(d, ev[0]) - x(d, ev[1]))*(x(d, ev[0]) - x(d, ev[1]));
++         }
++         longest = std::max(longest, l);
++         if (ev[0] + ev[1] == 1) { marked = l; }
++      }
++      n += (marked < longest*(1.0 - 1e-12));
++   }
++   MPI_Allreduce(MPI_IN_PLACE, &n, 1, MPI_INT, MPI_SUM, pmesh.GetComm());
++   return n;
++}
++
++/// Waits until all the ranks of @a comm call this, or aborts the run if they
++/// do not within @a seconds: a rank kept in a collective call that the others
++/// did not make would otherwise hang the test. @a comm must not be used by the
++/// code before the call (e.g. a duplicate of the communicator of the mesh).
++void AbortUnlessAllArrive(MPI_Comm comm, double seconds)
++{
++   MPI_Request request;
++   MPI_Ibarrier(comm, &request);
++   const double start = MPI_Wtime();
++   int arrived = 0;
++   while (!arrived)
++   {
++      MPI_Test(&request, &arrived, MPI_STATUS_IGNORE);
++      if (!arrived && MPI_Wtime() - start > seconds)
++      {
++         mfem::err << "Not all the ranks arrived within " << seconds
++                   << " s: aborting." << std::endl;
++         MPI_Abort(comm, 1);
++      }
++   }
++}
++
++/// The largest distance, on all the ranks, between the vertices of the
++/// elements and the images of their reference vertices by the nodes.
++real_t NodesAtVerticesGap(ParMesh &pmesh)
++{
++   real_t gap = 0.0;
++   IsoparametricTransformation T;
++   DenseMatrix x;
++   for (int e = 0; e < pmesh.GetNE(); e++)
++   {
++      const Element *el = pmesh.GetElement(e);
++      pmesh.GetElementTransformation(e, &T);
++      T.Transform(*Geometries.GetVertices(el->GetGeometryType()), x);
++      const int *v = el->GetVertices();
++      for (int k = 0; k < el->GetNVertices(); k++)
++      {
++         const real_t *p = pmesh.GetVertex(v[k]);
++         real_t d = 0.0;
++         for (int i = 0; i < x.Height(); i++)
++         {
++            d += (x(i, k) - p[i])*(x(i, k) - p[i]);
++         }
++         gap = std::max(gap, std::sqrt(d));
++      }
++   }
++   MPI_Allreduce(MPI_IN_PLACE, &gap, 1, MPITypeMap<real_t>::mpi_type, MPI_MAX,
++                 pmesh.GetComm());
++   return gap;
++}
++
++/// The largest distance between the points of the shared faces as mapped
++/// from their two sides, through the face neighbor data; infinity if these
++/// data do not describe the shared faces.
++real_t SharedFaceGap(ParMesh &pmesh)
++{
++   real_t gap = 0.0;
++   try
++   {
++      pmesh.ExchangeFaceNbrData();
++      Vector x1, x2;
++      for (int f = 0; f < pmesh.GetNSharedFaces(); f++)
++      {
++         FaceElementTransformations *T = pmesh.GetSharedFaceTransformations(f);
++         const IntegrationRule &ir = IntRules.Get(T->GetGeometryType(), 3);
++         for (int j = 0; j < ir.GetNPoints(); j++)
++         {
++            T->SetAllIntPoints(&ir.IntPoint(j));
++            T->Elem1->Transform(T->GetElement1IntPoint(), x1);
++            T->Elem2->Transform(T->GetElement2IntPoint(), x2);
++            gap = std::max(gap, x1.DistanceTo(x2));
++         }
++      }
++   }
++   catch (std::exception &)
++   {
++      gap = std::numeric_limits<real_t>::infinity();
++   }
++   MPI_Allreduce(MPI_IN_PLACE, &gap, 1, MPITypeMap<real_t>::mpi_type, MPI_MAX,
++                 pmesh.GetComm());
++   return gap;
++}
++
++/// The largest change of the nodes, and of a smooth field interpolated in the
++/// space of the nodes, when the values of their shared dofs are replaced by
++/// those of their owners: round-off if the space of the nodes is conforming.
++real_t NodalSpaceError(ParMesh &pmesh)
++{
++   ParGridFunction &nodes = *static_cast<ParGridFunction *>(pmesh.GetNodes());
++   ParFiniteElementSpace &fes = *nodes.ParFESpace();
++   VectorFunctionCoefficient u(3, [](const Vector &x, Vector &y)
++   {
++      y(0) = 1.0 + x(1)*x(2);
++      y(1) = 2.0 - x(0)*x(2);
++      y(2) = 3.0 + x(0)*x(1);
++   });
++   ParGridFunction field(&fes);
++   field.ProjectCoefficient(u);
++   real_t err = 0.0;
++   for (ParGridFunction *x : {&nodes, &field})
++   {
++      Vector t(fes.GetTrueVSize());
++      x->GetTrueDofs(t);
++      ParGridFunction y(&fes);
++      y.SetFromTrueDofs(t);
++      y -= *x;
++      err = std::max(err, y.Normlinf());
++   }
++   MPI_Allreduce(MPI_IN_PLACE, &err, 1, MPITypeMap<real_t>::mpi_type, MPI_MAX,
++                 pmesh.GetComm());
++   return err;
++}
++
++} // namespace tet_marking
++
++TEST_CASE("ParMesh marks tetrahedra alike on all ranks",
++          "[Parallel], [ParMesh]")
++{
++   // The marking of the shared triangles of these prisms depends on the global
++   // order of their edges of equal length, which all ranks must agree on.
++   // Marking after a uniform refinement (which leaves the tetrahedra
++   // unmarked), then local refinement.
++   Mesh serial = tet_marking::EquilateralPrisms(4);
++   ParMesh pmesh(MPI_COMM_WORLD, serial);
++   REQUIRE(tet_marking::SharedEntitiesAgree(pmesh));
++   pmesh.UniformRefinement();
++   pmesh.Finalize(true);
++   REQUIRE(tet_marking::SharedEntitiesAgree(pmesh));
++   tet_marking::RefineLeftHalf(pmesh);
++   CHECK(tet_marking::SharedEntitiesAgree(pmesh));
++}
++
++TEST_CASE("ParMesh marks shared triangles from the lengths of their master",
++          "[Parallel], [ParMesh]")
++{
++   // Each rank stretches its copy of the mesh along x by its own factor, so
++   // that the ranks compute different lengths for the same shared edges, as
++   // round-off does after the refinement of a curved mesh, on a larger scale
++   // here. The ranks must still mark their shared triangles alike.
++   Mesh serial = tet_marking::EquilateralPrisms(4);
++   ParMesh pmesh(MPI_COMM_WORLD, serial);
++   const real_t s = 1.0 + 1e-3*Mpi::WorldRank();
++   for (int v = 0; v < pmesh.GetNV(); v++) { pmesh.GetVertex(v)[0] *= s; }
++   pmesh.Finalize(true);
++   REQUIRE(tet_marking::SharedEntitiesAgree(pmesh));
++   tet_marking::RefineLeftHalf(pmesh);
++   CHECK(tet_marking::SharedEntitiesAgree(pmesh));
++}
++
++TEST_CASE("ParMesh marked again updates its face neighbors",
++          "[Parallel], [ParMesh]")
++{
++   // A Nedelec space of order 2 has the mesh exchange the data of its face
++   // neighbors, which include the orientations of the shared faces in the
++   // neighbor elements. Marking the tetrahedra again changes these
++   // orientations: the spaces built after it must not use the old ones.
++   Mesh serial = tet_marking::EquilateralPrisms(4);
++   ParMesh pmesh(MPI_COMM_WORLD, serial);
++   pmesh.UniformRefinement();
++   {
++      ND_FECollection nd(2, 3);
++      ParFiniteElementSpace fes(&pmesh, &nd);
++      fes.Dof_TrueDof_Matrix();
++   }
++   pmesh.Finalize(true);
++   CHECK(tet_marking::NDAndRTConforming(pmesh));
++}
++
++TEST_CASE("ParMesh marks tetrahedra consistently through refinements",
++          "[Parallel], [ParMesh]")
++{
++   // Edges of equal length, of nearly equal length, and curved meshes, whose
++   // ranks hold node values that differ by round-off after a refinement.
++   // After a uniform refinement, a new marking, and rounds of local refinement
++   // near a boundary, the ranks agree on their shared entities, the faces and
++   // the boundary triangles agree with the marking of their tetrahedra, and
++   // ND and RT spaces are conforming.
++   struct Case
++   {
++      const char *name;
++      bool prisms;
++      real_t eps;
++      int order;
++      bool deform;
++   };
++   const Case cases[] =
++   {
++      {"prisms", true, 0.0, 0, false},
++      {"prisms, perturbed", true, 3e-7, 0, false},
++      {"prisms, nodes of order 3", true, 0.0, 3, false},
++      {"cubes, nodes of order 2", false, 0.0, 2, false},
++      {"cubes, curved, nodes of order 2", false, 0.0, 2, true},
++      {"cubes, curved, nodes of order 3", false, 0.0, 3, true}
++   };
++   const Case &c = cases[GENERATE(0, 1, 2, 3, 4, 5)];
++   INFO(c.name);
++   Mesh serial = tet_marking::TetMesh(c.prisms, c.eps, c.order, c.deform);
++   Vector pmin, pmax, p(3);
++   serial.GetBoundingBox(pmin, pmax);
++   p(0) = 0.5*(pmin(0) + pmax(0));
++   p(1) = 0.5*(pmin(1) + pmax(1));
++   p(2) = pmin(2);
++   ParMesh pmesh(MPI_COMM_WORLD, serial);
++   serial.Clear();
++   auto Check = [&pmesh](bool marked)
++   {
++      REQUIRE(tet_marking::SharedEntitiesAgree(pmesh));
++      if (marked) { REQUIRE(tet_marking::LocalFacesAgree(pmesh)); }
++      REQUIRE(tet_marking::NDAndRTConforming(pmesh));
++   };
++   Check(true);
++   pmesh.UniformRefinement();
++   Check(false);
++   pmesh.Finalize(true);
++   Check(true);
++   for (int r = 0; r < 3; r++)
++   {
++      tet_marking::RefineNear(pmesh, p, 0.3*std::pow(0.5, r));
++      Check(true);
++   }
++}
++
++TEST_CASE("ParMesh marks shared triangles alike when their vertices differ by "
++          "round-off", "[Parallel], [ParMesh]")
++{
++   // Two tetrahedra share an equilateral face, so its three edges have the
++   // same squared length up to round-off. The second rank moves the apex of
++   // the face by 1 to 6 units in the last place, as round-off does after the
++   // refinement of a curved mesh: the two ranks must still mark the face
++   // alike, which they do with the lengths that the group master computes.
++   if (Mpi::WorldSize() < 2) { return; }
++   int differ = 0;
++   for (int ulps = 1; ulps <= 6; ulps++)
++   {
++      Mesh serial(3, 5, 2);
++      const real_t p[5][3] = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0},
++         {0.5, std::sqrt(0.75), 0.0}, {0.5, 0.3, 1.0}, {0.5, 0.3, -1.0}
++      };
++      for (int v = 0; v < 5; v++) { serial.AddVertex(p[v]); }
++      serial.AddTet(0, 1, 2, 3);
++      serial.AddTet(1, 0, 2, 4);
++      serial.FinalizeTopology();
++      serial.Finalize(true);
++      int partitioning[2] = {0, 1};
++      ParMesh pmesh(MPI_COMM_WORLD, serial, partitioning);
++      if (Mpi::WorldRank() == 1)
++      {
++         for (int v = 0; v < pmesh.GetNV(); v++)
++         {
++            real_t *x = pmesh.GetVertex(v);
++            if (x[2] == 0.0 && x[1] > 0.0)
++            {
++               for (int k = 0; k < ulps; k++)
++               {
++                  x[1] = std::nextafter(x[1], real_t(1));
++               }
++            }
++         }
++      }
++      pmesh.Finalize(true);
++      differ += !tet_marking::SharedEntitiesAgree(pmesh);
++   }
++   INFO(differ << " of 6 perturbations marked differently");
++   CHECK(differ == 0);
++}
++
++TEST_CASE("ParMesh marked again keeps ND_3 and RT_3 spaces conforming",
++          "[Parallel], [ParMesh]")
++{
++   // Distributed, refined uniformly and marked again, without any local
++   // refinement: Nedelec and Raviart-Thomas spaces built then on
++   // ND_FECollection(3) and RT_FECollection(3) (whose GetOrder() is 4) must
++   // be conforming. The order of the shared edges must be the same on all
++   // ranks, not only within each group: a shared triangle can have edges of
++   // different groups, and its ranks would then mark it differently.
++   Mesh serial = tet_marking::EquilateralPrisms(4);
++   ParMesh pmesh(MPI_COMM_WORLD, serial);
++   pmesh.UniformRefinement();
++   pmesh.Finalize(true);
++   CHECK(tet_marking::SharedEntitiesAgree(pmesh));
++   ND_FECollection nd(3, 3);
++   RT_FECollection rt(3, 3);
++   CHECK(tet_marking::ConformityError(pmesh, nd) < 1e-10);
++   CHECK(tet_marking::ConformityError(pmesh, rt) < 1e-10);
++}
++
++TEST_CASE("ParMesh marks meshes with discontinuous nodes by their lengths",
++          "[Parallel], [ParMesh]")
++{
++   // The nodes of a periodic mesh are discontinuous: a vertex on a periodic
++   // boundary has a position in each of its elements. With cells long in one
++   // direction, each element marked again on the ranks is marked by its
++   // longest edge, and the ranks agree on their shared entities. A straight
++   // mesh with discontinuous nodes is marked as the same mesh without nodes.
++   const int dim = GENERATE(2, 3);
++   INFO(dim << "D");
++   {
++      Mesh base = (dim == 2) ?
++                  Mesh::MakeCartesian2D(4, 3, Element::TRIANGLE, false, 1.0,
++                                        9.0) :
++                  Mesh::MakeCartesian3D(3, 3, 3, Element::TETRAHEDRON, 1.0,
++                                        4.0, 13.0);
++      std::vector<Vector> translations;
++      for (int d = 0; d < dim; d++)
++      {
++         Vector t(dim);
++         t = 0.0;
++         t(d) = (d == 0) ? 1.0 : (d == 1) ? ((dim == 2) ? 9.0 : 4.0) : 13.0;
++         translations.push_back(t);
++      }
++      Mesh serial = Mesh::MakePeriodic(
++                       base, base.CreatePeriodicVertexMapping(translations));
++      ParMesh pmesh(MPI_COMM_WORLD, serial);
++      pmesh.Finalize(true);
++      CHECK(tet_marking::MarkedNotLongest(pmesh) == 0);
++      CHECK(tet_marking::SharedEntitiesAgree(pmesh));
++      if (dim == 3) { CHECK(tet_marking::LocalFacesAgree(pmesh)); }
++   }
++   auto Make = [dim]()
++   {
++      Mesh mesh = (dim == 2) ?
++                  Mesh::MakeCartesian2D(6, 6, Element::TRIANGLE) :
++                  Mesh::MakeCartesian3D(4, 4, 4, Element::TETRAHEDRON);
++      for (int v = 0; v < mesh.GetNV(); v++)
++      {
++         real_t *x = mesh.GetVertex(v);
++         for (int d = 0; d < dim; d++)
++         {
++            x[d] += 0.015*std::sin(12.9898*v + 78.233*d);
++         }
++      }
++      return mesh;
++   };
++   Mesh plain = Make(), nodal = Make();
++   nodal.SetCurvature(2, true);
++   int *part = plain.GeneratePartitioning(Mpi::WorldSize());
++   ParMesh pplain(MPI_COMM_WORLD, plain, part), pnodal(MPI_COMM_WORLD, nodal,
++                                                       part);
++   delete [] part;
++   pplain.Finalize(true);
++   pnodal.Finalize(true);
++   int same = (pplain.GetNE() == pnodal.GetNE());
++   for (int e = 0; same && e < pplain.GetNE(); e++)
++   {
++      const int *a = pplain.GetElement(e)->GetVertices();
++      const int n = pplain.GetElement(e)->GetNVertices();
++      same = std::equal(a, a + n, pnodal.GetElement(e)->GetVertices());
++   }
++   MPI_Allreduce(MPI_IN_PLACE, &same, 1, MPI_INT, MPI_LAND, MPI_COMM_WORLD);
++   CHECK(same == 1);
++   CHECK(tet_marking::MarkedNotLongest(pnodal) == 0);
++}
++
++TEST_CASE("ParMesh marks discontinuous nodes inverted on some ranks",
++          "[Parallel], [ParMesh]")
++{
++   // Finalize(true, true) fixes the inverted elements of each rank, then marks
++   // the elements, reading discontinuous nodes in the vertex orders that they
++   // follow until it reorders them: the ranks must make the same collective
++   // calls, whether they have inverted elements, none, or no element at all.
++   // Two disconnected tetrahedra with L2 nodes of order 2, on ranks 0 and 1
++   // (the other ranks have none), the one of rank 0 inverted, or, as a
++   // control, none. If a rank does not return from Finalize(), the others
++   // abort the run instead of waiting for it.
++   const bool invert = GENERATE(true, false);
++   INFO((invert ? "one tetrahedron inverted" : "none inverted"));
++   Mesh mesh(3, 8, 2);
++   for (int i = 0; i < 2; i++)
++   {
++      const real_t a = 3.0*i;
++      mesh.AddVertex(a, 0.0, 0.0);
++      mesh.AddVertex(a + 1.0, 0.0, 0.0);
++      mesh.AddVertex(a, 2.0, 0.0);
++      mesh.AddVertex(a, 0.0, 3.0);
++   }
++   if (invert) { mesh.AddTet(1, 0, 2, 3); }
++   else { mesh.AddTet(0, 1, 2, 3); }
++   mesh.AddTet(4, 5, 6, 7);
++   mesh.FinalizeTopology();
++   mesh.SetCurvature(2, true);
++   REQUIRE(mesh.CheckElementOrientation(false) == (invert ? 1 : 0));
++   int part[2] = {0, std::min(1, Mpi::WorldSize() - 1)};
++   ParMesh pmesh(MPI_COMM_WORLD, mesh, part);
++   MPI_Comm watch;
++   MPI_Comm_dup(MPI_COMM_WORLD, &watch);
++   pmesh.Finalize(true, true);
++   tet_marking::AbortUnlessAllArrive(watch, 60.0);
++   MPI_Comm_free(&watch);
++   int wrong = pmesh.CheckElementOrientation(false);
++   MPI_Allreduce(MPI_IN_PLACE, &wrong, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
++   CHECK(wrong == 0);
++   CHECK(tet_marking::MarkedNotLongest(pmesh) == 0);
++   CHECK(tet_marking::NodesAtVerticesGap(pmesh) < 1e-12);
++}
++
++TEST_CASE("ParMesh marks and refines the same for any partition",
++          "[Parallel], [ParMesh]")
++{
++   // The marking depends on the geometry only: a mesh distributed with a
++   // METIS, a cyclic or a random partition, marked again, refined uniformly,
++   // marked again and refined three times near a point is, element for element
++   // (vertices in their order, marked edge first, refinement flags), the
++   // serial mesh refined so. Meshes with many edges of equal length, in 2D and
++   // 3D; straight, with nodes of order 1, and with curved nodes of order 2,
++   // marked again only (before a parallel refinement, all the copies of the
++   // nodes are equal).
++   const int nranks = Mpi::WorldSize();
++   struct M { const char *name; std::function<Mesh()> make; bool refine; };
++   auto Curved2D = []
++   {
++      Mesh m = Mesh::MakeCartesian2D(6, 6, Element::TRIANGLE);
++      m.Finalize(true);
++      m.SetCurvature(2);
++      m.Transform([](const Vector &x, Vector &y)
++      {
++         y = x;
++         y(0) += 0.03*std::sin(3.0*x(1));
++         y(1) += 0.02*std::cos(2.0*x(0));
++      });
++      return m;
++   };
++   const std::vector<M> meshes =
++   {
++      {
++         "2D Cartesian", []
++         {
++            Mesh m = Mesh::MakeCartesian2D(6, 6, Element::TRIANGLE);
++            m.Finalize(true);
++            return m;
++         }, true
++      },
++      {"3D prisms", [] { return tet_marking::EquilateralPrisms(3); }, true},
++      {
++         "3D cubes", []
++         {
++            Mesh m = Mesh::MakeCartesian3D(3, 3, 3, Element::TETRAHEDRON);
++            m.Finalize(true);
++            return m;
++         }, true
++      },
++      {
++         "3D prisms, nodes of order 1", []
++         {
++            Mesh m = tet_marking::EquilateralPrisms(3);
++            m.SetCurvature(1);
++            return m;
++         }, true
++      },
++      {"2D curved, order 2", Curved2D, false},
++      {
++         "3D curved, order 2", []
++         { return tet_marking::TetMesh(true, 0.0, 2, true); }, false
++      }
++   };
++   for (const M &m : meshes)
++   {
++      for (int kind = 0; kind < 3; kind++)
++      {
++         INFO(m.name << ", " << (kind == 0 ? "METIS" : kind == 1 ? "cyclic" :
++                                 "random") << " partition");
++         Mesh serial = m.make();
++         Array<int> part(serial.GetNE());
++         for (int e = 0; e < serial.GetNE(); e++)
++         {
++            std::uint64_t h = (e + 1)*0x9E3779B97F4A7C15ull;
++            h ^= h >> 31;
++            part[e] = (kind == 1) ? e % nranks : int(h % nranks);
++         }
++         ParMesh pmesh(MPI_COMM_WORLD, serial,
++                       kind == 0 ? nullptr : part.GetData());
++         auto Same = [&]()
++         {
++            return tet_marking::Description(pmesh) ==
++                   tet_marking::Description(serial);
++         };
++         pmesh.Finalize(true);
++         serial.Finalize(true);
++         CHECK(Same());
++         if (!m.refine) { continue; }
++         pmesh.UniformRefinement();
++         pmesh.Finalize(true);
++         serial.UniformRefinement();
++         serial.Finalize(true);
++         CHECK(Same());
++         for (int round = 0; round < 3; round++)
++         {
++            Vector c(serial.Dimension());
++            c = 0.3 + 0.1*round;
++            tet_marking::RefineNear(pmesh, c, 0.3);
++            tet_marking::RefineNear(serial, c, 0.3);
++            INFO("round " << round);
++            CHECK(Same());
++         }
++      }
++   }
++}
++
++TEST_CASE("ParMesh reoriented updates its face neighbors",
++          "[Parallel], [ParMesh]")
++{
++   // ReorientTetMesh() changes the vertex order of the tetrahedra and numbers
++   // the faces again. The face neighbor data exchanged before, here by a
++   // Nedelec space of order 3, must not be used after it: new Nedelec and
++   // Raviart-Thomas spaces are conforming, and the transformations of the
++   // shared faces map their points to the same places from both sides.
++   Mesh serial = tet_marking::EquilateralPrisms(4);
++   ParMesh pmesh(MPI_COMM_WORLD, serial);
++   pmesh.UniformRefinement();
++   {
++      ND_FECollection nd(3, 3);
++      ParFiniteElementSpace fes(&pmesh, &nd);
++      fes.Dof_TrueDof_Matrix();
++   }
++#ifdef MFEM_HAVE_GCC_PRAGMA_DIAGNOSTIC
++#pragma GCC diagnostic push
++#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
++#endif
++   pmesh.ReorientTetMesh();
++#ifdef MFEM_HAVE_GCC_PRAGMA_DIAGNOSTIC
++#pragma GCC diagnostic pop
++#endif
++   CHECK(tet_marking::NDAndRTConforming(pmesh));
++   CHECK(tet_marking::SharedFaceGap(pmesh) < 1e-12);
++}
++
++TEST_CASE("ParMesh marked again keeps the space of its nodes conforming",
++          "[Parallel], [ParMesh]")
++{
++   // A new marking, and a reorientation, number the edges and faces again and
++   // rebuild the space of the nodes: it must be built with the shared edges
++   // and faces of the new numbering. With nodes of orders 2 to 4, the nodes
++   // and a field interpolated in their space equal their restriction to the
++   // true dofs prolongated back, after a uniform refinement and a new marking,
++   // and after a reorientation.
++   const int order = GENERATE(2, 3, 4);
++   INFO("nodes of order " << order);
++   Mesh serial = tet_marking::TetMesh(true, 0.0, order, false);
++   ParMesh pmesh(MPI_COMM_WORLD, serial);
++   serial.Clear();
++   pmesh.UniformRefinement();
++   pmesh.Finalize(true);
++   CHECK(tet_marking::NodalSpaceError(pmesh) < 1e-12);
++#ifdef MFEM_HAVE_GCC_PRAGMA_DIAGNOSTIC
++#pragma GCC diagnostic push
++#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
++#endif
++   pmesh.ReorientTetMesh();
++#ifdef MFEM_HAVE_GCC_PRAGMA_DIAGNOSTIC
++#pragma GCC diagnostic pop
++#endif
++   CHECK(tet_marking::NodalSpaceError(pmesh) < 1e-12);
++}
++
+ #endif // MFEM_USE_MPI
+ 
+ } // namespace mfem
