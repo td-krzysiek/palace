@@ -571,21 +571,19 @@ RomOperator::RomOperator(const IoData &iodata, SpaceOperator &space_op,
   // in CalculateNormalizedPROMMatrices). On the imaginary slot, matching Mwp_p.
   //   - 2nd-order farfield ABC: M_ff with full term i·(0.5/ω)·M_ff (M_ff includes the
   //     negative sign of β, and is complex with a Floquet wave vector).
-  //   - Surface conductivity: one boundary mass per active attribute group, term
-  //     (i·ω/Z_g(ω))·A_σ_g.
+  //   - The frequency-dependent boundary mass terms of SurfaceTerms (one per finite
+  //     conductivity group, then one per rational impedance boundary): term
+  //     scale_i(ω)·M_i.
   M_ff_ = space_op.GetFarfieldBoundaryCurlCurlMatrix<ComplexOperator>(Operator::DIAG_ZERO,
                                                                       /*imag_slot=*/true);
   {
-    const auto &surf_op = space_op.GetSurfaceConductivityOp();
-    Asig_g_.resize(surf_op.Size());
-    Asig_g_r.resize(surf_op.Size());
-    for (std::size_t g = 0; g < surf_op.Size(); g++)
+    const int num_terms = space_op.GetSurfaceTerms().GetNumExtraSystemBdrMassTerms();
+    M_surf_.resize(num_terms);
+    M_surf_r.resize(num_terms);
+    for (int i = 0; i < num_terms; i++)
     {
-      if (surf_op.IsActive(g))
-      {
-        Asig_g_[g] = space_op.GetSurfaceConductivityBoundaryMatrix<ComplexOperator>(
-            static_cast<int>(g), Operator::DIAG_ZERO);
-      }
+      M_surf_[i] = space_op.GetExtraSystemBdrMassTermMatrix<ComplexOperator>(
+          i, Operator::DIAG_ZERO, /*imag_slot=*/true);
     }
   }
 
@@ -598,20 +596,6 @@ RomOperator::RomOperator(const IoData &iodata, SpaceOperator &space_op,
     if (Mp)
     {
       M_floquet_p_.emplace(port_idx, std::move(Mp));
-    }
-  }
-
-  // Per-boundary rational surface impedance mass (imaginary slot, matching the
-  // convention). The online scalar is f(ω) = g(iω)/i with g(s) = s·D(s)/N(s) the Robin
-  // coefficient, evaluated in closed form; the synthesis fit is poly+AAA.
-  {
-    const auto &surf_rz_op = space_op.GetRationalImpedanceOp();
-    Arz_b_.resize(surf_rz_op.GetNumBoundaries());
-    Arz_b_r.resize(surf_rz_op.GetNumBoundaries());
-    for (int b = 0; b < surf_rz_op.GetNumBoundaries(); b++)
-    {
-      Arz_b_[b] = space_op.GetRationalImpedanceBoundaryMassMatrix<ComplexOperator>(
-          b, Operator::DIAG_ZERO, /*imag_slot=*/true);
     }
   }
 
@@ -1182,8 +1166,9 @@ void RomOperator::UpdatePROM(const ComplexVector &u, std::string_view node_label
     ProjectMatInternal(comm, V, *Mp_hdm, Mp_r, r, dim_V_old, true);
   }
   // Other frequency-dependent BC boundary masses folded into circuit synthesis: the
-  // 2nd-order farfield ABC (M_ff_) and each surface-conductivity group (Asig_g_). Projected
-  // like the wave-port masses so the synthesis path treats them uniformly.
+  // 2nd-order farfield ABC (M_ff_) and each frequency-dependent boundary mass term of
+  // SurfaceTerms (M_surf_). Projected like the wave-port masses so the synthesis path
+  // treats them uniformly.
   if (M_ff_)
   {
     // Hermitian (not symmetric) with a Floquet wave vector which does not depend on
@@ -1193,20 +1178,12 @@ void RomOperator::UpdatePROM(const ComplexVector &u, std::string_view node_label
     ProjectMatInternal(comm, V, *M_ff_, M_ff_r, r, dim_V_old,
                        !mat_op.HasWaveVector() || mat_op.HasFloquetFrequencyScaling());
   }
-  for (std::size_t g = 0; g < Asig_g_.size(); g++)
+  for (std::size_t i = 0; i < M_surf_.size(); i++)
   {
-    if (Asig_g_[g])
+    if (M_surf_[i])
     {
-      Asig_g_r[g].conservativeResize(dim_V_new, dim_V_new);
-      ProjectMatInternal(comm, V, *Asig_g_[g], Asig_g_r[g], r, dim_V_old, true);
-    }
-  }
-  for (std::size_t b = 0; b < Arz_b_.size(); b++)
-  {
-    if (Arz_b_[b])
-    {
-      Arz_b_r[b].conservativeResize(dim_V_new, dim_V_new);
-      ProjectMatInternal(comm, V, *Arz_b_[b], Arz_b_r[b], r, dim_V_old, true);
+      M_surf_r[i].conservativeResize(dim_V_new, dim_V_new);
+      ProjectMatInternal(comm, V, *M_surf_[i], M_surf_r[i], r, dim_V_old, true);
     }
   }
   // Per-port Floquet Robin boundary mass projection (same pattern as wave-port masses).
@@ -1314,13 +1291,14 @@ void RomOperator::SolvePROM(int excitation_idx, double omega, ComplexVector &u)
       space_op.GetFloquetPortOp().Initialize(omega);
     }
 
-    // Other ω-nonlinear A2 contributors (second-order farfield ABC and surface
-    // conductivity). These are applied in factored form: their ω-independent boundary
-    // masses (M_ff_r, Asig_g_r) were projected onto the basis once in UpdatePROM, exactly
-    // like the wave-port masses, so the online cost is a per-ω scalar times an n×n matrix
-    // add — no per-ω HDM- scale assembly or reprojection. This is algebraically identical
-    // to projecting the full A2(ω) here (the scalar is uniform per boundary group, so it
-    // commutes with the projection) and matches the HDM stamping to round-off.
+    // Other ω-nonlinear A2 contributors (second-order farfield ABC and the
+    // frequency-dependent boundary mass terms of SurfaceTerms). These are applied in
+    // factored form: their ω-independent boundary masses (M_ff_r, M_surf_r) were projected
+    // onto the basis once in UpdatePROM, exactly like the wave-port masses, so the online
+    // cost is a per-ω scalar times an n×n matrix add — no per-ω HDM- scale assembly or
+    // reprojection. This is algebraically identical to projecting the full A2(ω) here (the
+    // scalar is uniform per boundary group, so it commutes with the projection) and
+    // matches the HDM stamping to round-off.
     //
     // Robustness: the structural check below requires every factored operator we hold to be
     // sized to the current basis, but it cannot know whether the factored set is COMPLETE
@@ -1338,37 +1316,24 @@ void RomOperator::SolvePROM(int excitation_idx, double omega, ComplexVector &u)
       {
         Ar += std::complex<double>(0.5 / omega, 0.0) * M_ff_r;
       }
-      // Factored surface conductivity, per active group: A2_σ,g(ω) = (i·ω/Z_g(ω))·A_σ,g =
-      // EvaluateScalar(g,ω)·A_σ,g. Asig_g_r[g] carries A_σ,g on the imaginary slot, so the
-      // scalar here is EvaluateScalar/i to avoid double-counting the i (matching the
-      // synthesis convention in CalculateNormalizedPROMMatrices). EvaluateScalar is closed
-      // form (skin depth + optional finite-thickness correction) — a few transcendental ops
-      // per group, negligible versus the reduced solve. No AAA needed online.
-      const auto &surf_op = space_op.GetSurfaceConductivityOp();
-      for (std::size_t g = 0; g < Asig_g_.size(); g++)
+      // Factored frequency-dependent boundary mass terms of SurfaceTerms (finite
+      // conductivity groups, then rational impedance boundaries), per term: A2_i(ω) =
+      // scale_i(ω)·M_i. M_surf_r[i] carries M_i on the imaginary slot, so the scalar here
+      // is scale_i/i to avoid double-counting the i (matching the synthesis convention in
+      // CalculateNormalizedPROMMatrices). The scales are closed form (for example the skin
+      // depth and the optional finite-thickness correction of a conductivity group, or two
+      // Horner evaluations for a rational impedance), negligible versus the reduced solve.
+      // No AAA needed online.
+      const auto &surface_terms = space_op.GetSurfaceTerms();
+      for (std::size_t i = 0; i < M_surf_.size(); i++)
       {
-        if (Asig_g_[g] && Asig_g_r[g].rows() == static_cast<long>(V.size()))
+        if (M_surf_[i] && M_surf_r[i].rows() == static_cast<long>(V.size()))
         {
           const std::complex<double> s =
-              surf_op.EvaluateScalar(g, std::complex<double>(omega, 0.0)) /
+              surface_terms.GetExtraSystemBdrMassTermScale(
+                  static_cast<int>(i), std::complex<double>(omega, 0.0)) /
               std::complex<double>(0.0, 1.0);
-          Ar += s * Asig_g_r[g];
-        }
-      }
-      // Factored rational surface impedance, per boundary: A2_rz,b(ω) = g(iω)·M_b =
-      // i·(g(iω)/i)·M_b. Arz_b_r[b] carries M_b on the imaginary slot, so the scalar here
-      // is EvalRobinCoefficient/i (matching the synthesis convention). Closed form (two
-      // Horner evaluations per boundary), no AAA needed online.
-      const auto &surf_rz_op = space_op.GetRationalImpedanceOp();
-      for (std::size_t b = 0; b < Arz_b_.size(); b++)
-      {
-        if (Arz_b_[b] && Arz_b_r[b].rows() == static_cast<long>(V.size()))
-        {
-          const std::complex<double> s =
-              surf_rz_op.EvalRobinCoefficient(static_cast<int>(b),
-                                              std::complex<double>(0.0, omega)) /
-              std::complex<double>(0.0, 1.0);
-          Ar += s * Arz_b_r[b];
+          Ar += s * M_surf_r[i];
         }
       }
       // Factored Floquet port Robin BC: A2_floquet,p(ω) = i·γ₀,p(ω)·M_floquet_p.
@@ -1397,18 +1362,11 @@ void RomOperator::SolvePROM(int excitation_idx, double omega, ComplexVector &u)
       {
         (M_ff_r.rows() == n) ? (any_factored = true) : (all_present = false);
       }
-      for (std::size_t g = 0; g < Asig_g_.size(); g++)
+      for (std::size_t i = 0; i < M_surf_.size(); i++)
       {
-        if (Asig_g_[g])
+        if (M_surf_[i])
         {
-          (Asig_g_r[g].rows() == n) ? (any_factored = true) : (all_present = false);
-        }
-      }
-      for (std::size_t b = 0; b < Arz_b_.size(); b++)
-      {
-        if (Arz_b_[b])
-        {
-          (Arz_b_r[b].rows() == n) ? (any_factored = true) : (all_present = false);
+          (M_surf_r[i].rows() == n) ? (any_factored = true) : (all_present = false);
         }
       }
       for (const auto &[port_idx, Mp_r] : M_floquet_p_r)
@@ -1936,34 +1894,26 @@ RomOperator::WavePortDispersionFit RomOperator::FitScalarDispersion(
 }
 
 RomOperator::WavePortDispersionFit
-RomOperator::FitRationalImpedanceDispersion(const std::string &label,
-                                            const Eigen::MatrixXcd &Mp_r, int idx) const
+RomOperator::FitExactSplitDispersion(const std::string &label, const Eigen::MatrixXcd &Mp_r,
+                                     const SurfaceTerms::ExactSplit &split) const
 {
-  // Exact split of the rational Robin coefficient g(s) = s·D(s)/N(s) = P(s) + R(s)/N(s)
-  // (long division, precomputed by SurfaceRationalImpedanceOperator). The full term is
-  // g(iω)·M_b = i·f(ω)·M_b with f(ω) = g(iω)/i, so the polynomial part contributes
-  // f_P(ω) = P(iω)/i = P₀/i + P₁ω + i·P₂ω² + ... — exactly representable in the pencil
-  // for deg(P) <= 2 (guaranteed for any passive N/D). The strictly proper remainder
-  // f_R(ω) = (R/N)(iω)/i is itself rational in ω with the poles of g (the zeros of Zs
-  // mapped to the ω plane), so AAA on f_R directly reproduces it to rounding.
-  const auto &surf_rz_op = space_op.GetRationalImpedanceOp();
-  const int deg_P = surf_rz_op.GetRobinQuotientDegree(idx);
-  if (deg_P > 2)
-  {
-    // Non-passive input (|deg N - deg D| > 1); fall back to the generic recipe.
-    auto f = [&surf_rz_op, idx](std::complex<double> omega) -> std::complex<double>
-    {
-      return surf_rz_op.EvalRobinCoefficient(idx, std::complex<double>(0.0, 1.0) * omega) /
-             std::complex<double>(0.0, 1.0);
-    };
-    return FitScalarDispersion(label, Mp_r, f, /*allow_augment=*/true);
-  }
-
+  // Exact split of the scale of a frequency-dependent boundary mass term, c(s) = P(s) +
+  // R(s) with s = iω, for example the long division of the Robin coefficient g(s) =
+  // s·D(s)/N(s) = P(s) + R(s)/N(s) of a rational impedance boundary. The full term is
+  // c(iω)·M = i·f(ω)·M with f(ω) = c(iω)/i, so the polynomial part contributes f_P(ω) =
+  // P(iω)/i = P₀/i + P₁ω + i·P₂ω² + ... — exactly representable in the pencil for
+  // deg(P) <= 2 (guaranteed for any passive N/D), which the caller checks. The strictly
+  // proper remainder f_R(ω) = R(iω)/i is itself rational in ω with the poles of c (for a
+  // rational impedance, the zeros of Zs mapped to the ω plane), so AAA on f_R directly
+  // reproduces it to rounding.
+  MFEM_ASSERT(split.degree <= 2,
+              "The exact split of a synthesized term needs a polynomial part of degree at "
+              "most 2!");
   WavePortDispersionFit fit;
   fit.port_idx = -1;
 
   // Polynomial part, exact: with P(s) = Σ_k P_k s^k, f_P(ω) = Σ_k P_k i^{k-1} ω^k.
-  const auto &P = surf_rz_op.GetRobinQuotient(idx);
+  const auto &P = split.polynomial;
   const auto n_P = static_cast<int>(P.size());
   auto P_coeff = [&](int k) -> double  // P_k, coefficient of s^k (stored high-first)
   { return (k < n_P) ? P[n_P - 1 - k] : 0.0; };
@@ -1975,15 +1925,13 @@ RomOperator::FitRationalImpedanceDispersion(const std::string &label,
   constexpr int n_dense = 200;
   auto fit_omegas = SampleChebyshevLobatto(sweep_omega_min, sweep_omega_max, n_fit);
   auto dense_omegas = SampleChebyshevGauss(sweep_omega_min, sweep_omega_max, n_dense);
-  auto f_rem = [&surf_rz_op, idx](double w) -> std::complex<double>
+  auto f_rem = [&split](double w) -> std::complex<double>
   {
-    return surf_rz_op.EvalRobinRemainder(idx, std::complex<double>(0.0, w)) /
-           std::complex<double>(0.0, 1.0);
+    return split.remainder(std::complex<double>(0.0, w)) / std::complex<double>(0.0, 1.0);
   };
-  auto f_full = [&surf_rz_op, idx](double w) -> std::complex<double>
+  auto f_full = [&split](double w) -> std::complex<double>
   {
-    return surf_rz_op.EvalRobinCoefficient(idx, std::complex<double>(0.0, w)) /
-           std::complex<double>(0.0, 1.0);
+    return split.coefficient(std::complex<double>(0.0, w)) / std::complex<double>(0.0, 1.0);
   };
 
   // AAA directly on the strictly proper remainder (no LSQ residual step — the
@@ -2021,8 +1969,7 @@ RomOperator::FitRationalImpedanceDispersion(const std::string &label,
              pr.poles.size() == 1 ? "" : "s");
   if (fit.rel_err_augmented > waveport_synthesis_tol)
   {
-    Mpi::Warning("{}: rational impedance synthesis residual {:.3e} exceeds tolerance "
-                 "{:.3e}!\n",
+    Mpi::Warning("{}: exact-split synthesis residual {:.3e} exceeds tolerance {:.3e}!\n",
                  label, fit.rel_err_augmented, waveport_synthesis_tol);
   }
   return fit;
@@ -2563,42 +2510,34 @@ RomOperator::CalculateNormalizedPROMMatrices(const Units &units) const
                    "(residue 0.5)\n");
       }
     }
-    // Surface conductivity, one group at a time: f_g(ω) = ω/Z_g(ω) (the i is the implicit
-    // slot factor; EvaluateScalar returns i·ω/Z, so f = EvaluateScalar/i). Fit complex
-    // poly + AAA via FitScalarDispersion.
-    const auto &surf_op = space_op.GetSurfaceConductivityOp();
-    for (std::size_t g = 0; g < Asig_g_.size(); g++)
+    // The frequency-dependent boundary mass terms of SurfaceTerms, one at a time: the full
+    // term is scale_i(ω)·M_i = i·f_i(ω)·M_i with f_i(ω) = scale_i(ω)/i (the i is the
+    // implicit slot factor). A term with an exact split of its scale c(s) = P(s) + R(s)
+    // (s = iω) of deg(P) <= 2 (a rational impedance boundary) has its polynomial part put
+    // into the pencil and AAA run directly on the strictly proper remainder, which
+    // reproduces the coefficient to rounding. The others (a finite conductivity group, or
+    // a split of deg(P) > 2, from a non-passive impedance) are fit by complex poly + AAA
+    // via FitScalarDispersion.
+    const auto &surface_terms = space_op.GetSurfaceTerms();
+    for (std::size_t i = 0; i < M_surf_.size(); i++)
     {
-      if (!Asig_g_[g] || Asig_g_r[g].rows() != Kr.rows())
+      if (!M_surf_[i] || M_surf_r[i].rows() != Kr.rows())
       {
         continue;
       }
-      const auto label = fmt::format("surfsigma_{:d}", g);
-      auto f = [&surf_op, g](std::complex<double> omega) -> std::complex<double>
-      { return surf_op.EvaluateScalar(g, omega) / std::complex<double>(0.0, 1.0); };
-      auto fit = FitScalarDispersion(label, Asig_g_r[g], f, /*allow_augment=*/true);
-      ApplyComplexPolynomialFitCorrections(fit.alpha0c, fit.alpha1c, fit.alpha2c,
-                                           Asig_g_r[g], Kr_total_corr, Cr_total_corr,
-                                           Mr_total_corr);
-      if (fit.aux)
+      const int term = static_cast<int>(i);
+      const auto label = surface_terms.GetExtraSystemBdrMassTermLabel(term);
+      const auto split = surface_terms.GetExtraSystemBdrMassTermSplit(term);
+      auto f = [&surface_terms, term](std::complex<double> omega) -> std::complex<double>
       {
-        aux_blocks_total.push_back(*fit.aux);
-      }
-    }
-    // Rational surface impedance, one boundary at a time: the full Robin term is
-    // g(iω)·M_b = i·f_b(ω)·M_b with f_b(ω) = g(iω)/i and g(s) = s·D(s)/N(s). The exact
-    // long-division split (polynomial part into the pencil, AAA directly on the strictly
-    // proper remainder) reproduces the rational coefficient to rounding.
-    for (std::size_t b = 0; b < Arz_b_.size(); b++)
-    {
-      if (!Arz_b_[b] || Arz_b_r[b].rows() != Kr.rows())
-      {
-        continue;
-      }
-      const auto label = fmt::format("rationalz_{:d}", b);
-      auto fit = FitRationalImpedanceDispersion(label, Arz_b_r[b], static_cast<int>(b));
+        return surface_terms.GetExtraSystemBdrMassTermScale(term, omega) /
+               std::complex<double>(0.0, 1.0);
+      };
+      auto fit = (split && split->degree <= 2)
+                     ? FitExactSplitDispersion(label, M_surf_r[i], *split)
+                     : FitScalarDispersion(label, M_surf_r[i], f, /*allow_augment=*/true);
       ApplyComplexPolynomialFitCorrections(fit.alpha0c, fit.alpha1c, fit.alpha2c,
-                                           Arz_b_r[b], Kr_total_corr, Cr_total_corr,
+                                           M_surf_r[i], Kr_total_corr, Cr_total_corr,
                                            Mr_total_corr);
       if (fit.aux)
       {

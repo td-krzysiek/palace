@@ -17,6 +17,7 @@
 #include "linalg/operator.hpp"
 #include "linalg/rap.hpp"
 #include "linalg/vector.hpp"
+#include "models/surfaceterms.hpp"
 #include "utils/communication.hpp"
 #include "utils/filesystem.hpp"
 #include "utils/units.hpp"
@@ -188,14 +189,14 @@ protected:
   std::map<int, Eigen::MatrixXcd> Mwp_p_r;
   // True iff GetExtraSystemMatrix has any non-wave-port contributors (currently
   // second-order farfield, surface conductivity, or Floquet Robin terms). Set in the
-  // ctor; controls the slow SolvePROM A2 fallback path. NOTE: the farfield and surface
-  // conductivity contributors are now ALSO folded into the circuit synthesis (see M_ff_,
-  // Asig_g_ below); has_other_A2 still gates the online SolvePROM fallback, which is
-  // independent of synthesis.
+  // ctor; controls the slow SolvePROM A2 fallback path. NOTE: the farfield contributor
+  // and the frequency-dependent boundary mass terms of SurfaceTerms are now ALSO folded
+  // into the circuit synthesis (see M_ff_, M_surf_ below); has_other_A2 still gates the
+  // online SolvePROM fallback, which is independent of synthesis.
   bool has_other_A2 = false;
   // One-time self-check state for the factored online A2_other path (SolvePROM). On the
   // first factored online solve we verify that the factored sum (0.5/ω·M_ff_r +
-  // Σ_g EvaluateScalar(g,ω)/i·Asig_g_r) reproduces the full HDM projection of A2_other(ω)
+  // Σ_i scale_i(ω)/i·M_surf_r[i] + ...) reproduces the full HDM projection of A2_other(ω)
   // to round-off. This guards against a future ω-dependent non-wave-port BC being added to
   // GetExtraSystemMatrix without a matching factored operator (which would otherwise be
   // silently dropped). On failure we set other_A2_factored_ok = false and permanently use
@@ -229,24 +230,22 @@ protected:
   //     injected analytically (no fit). M_ff_ is the curl-curl boundary matrix, which
   //     includes the negative sign of β (see
   //     SpaceOperator::GetFarfieldBoundaryCurlCurlMatrix).
-  //   - Surface conductivity, one entry per attribute group g: f(ω) = ω/Z_g(ω) (the i is
-  //     the implicit slot factor; surf_sigma_op.EvaluateScalar returns i·ω/Z, so the scalar
-  //     used here is EvaluateScalar/i, generally complex), fit by poly+AAA.
+  //   - The frequency-dependent boundary mass terms of SurfaceTerms, one entry per term i
+  //     (SurfaceTerms::GetNumExtraSystemBdrMassTerms: one per finite conductivity group,
+  //     then one per rational impedance boundary): f(ω) = scale_i(ω)/i (the i is the
+  //     implicit slot factor; the full term is i·f(ω)·M_i = scale_i(ω)·M_i, with
+  //     SurfaceTerms::GetExtraSystemBdrMassTermScale), generally complex, fit by poly+AAA,
+  //     or with an exact split of the scale (the rational Robin coefficient of a rational
+  //     impedance) as its polynomial part and AAA on the remainder.
   //   - Floquet port Robin BC, one entry per port p: f(ω) = γ₀,p(ω) =
   //     sqrt(max(0, ω²µε - |B₀₀+kF|²)), the specular (0,0) propagation constant.
   //     Closed form, no fit. The i is the implicit slot factor (imaginary-slot mass).
-  //   - Rational surface impedance, one entry per boundary b: f(ω) = g(iω)/i with
-  //     g(s) = s·D(s)/N(s) the Robin coefficient (the i is the implicit slot factor;
-  //     the full term is i·f(ω)·M_b = g(iω)·M_b), generally complex, fit by poly+AAA.
-  //     Since g is rational in ω the poly+AAA fit is typically exact to rounding.
   std::unique_ptr<ComplexOperator> M_ff_;
   Eigen::MatrixXcd M_ff_r;
-  std::vector<std::unique_ptr<ComplexOperator>> Asig_g_;
-  std::vector<Eigen::MatrixXcd> Asig_g_r;
+  std::vector<std::unique_ptr<ComplexOperator>> M_surf_;
+  std::vector<Eigen::MatrixXcd> M_surf_r;
   std::map<int, std::unique_ptr<ComplexOperator>> M_floquet_p_;
   std::map<int, Eigen::MatrixXcd> M_floquet_p_r;
-  std::vector<std::unique_ptr<ComplexOperator>> Arz_b_;
-  std::vector<Eigen::MatrixXcd> Arz_b_r;
 
   // Sweep band [ω_min, ω_max] (nondimensional, rad) captured from iodata at construction
   // time. Used to (a) sample kₙ,p(ω) for the synthesis polynomial fit, and (b) define the
@@ -430,9 +429,10 @@ protected:
   static std::complex<double> EvaluateWavePortKnFit(const WavePortDispersionFit &fit,
                                                     std::complex<double> omega);
 
-  // Generalized scalar-dispersion fit for the other frequency-dependent BCs (surface
-  // conductivity). Like FitWavePortDispersion but driven by an arbitrary scalar function
-  // f(ω) (here ω/Z_g(ω), generally COMPLEX) instead of the wave-port kₙ(ω). The projected
+  // Generalized scalar-dispersion fit for the other frequency-dependent BCs (the
+  // frequency-dependent boundary mass terms of SurfaceTerms). Like FitWavePortDispersion
+  // but driven by an arbitrary scalar function f(ω) (for example ω/Z_g(ω) of a surface
+  // conductivity group, generally COMPLEX) instead of the wave-port kₙ(ω). The projected
   // boundary mass `Mp_r` is purely imaginary (= i·M_proj) so the assembled contribution is
   // i·f(ω)·M_proj·v. Produces complex α₀/α₁/α₂ and, when augmenting, an aux block with
   // complex residues. `label` is used in the diagnostic print and aux-state labels.
@@ -441,13 +441,15 @@ protected:
                       const std::function<std::complex<double>(std::complex<double>)> &f,
                       bool allow_augment) const;
 
-  // Exact-split fit for a rational surface impedance boundary: the Robin coefficient
-  // g(s) = s·D(s)/N(s) = P(s) + R(s)/N(s) (long division) has a polynomial part P that is
-  // exactly representable in the pencil (deg(P) <= 2 for any passive input), so only the
-  // strictly proper remainder R/N is AAA-fit — directly.
-  WavePortDispersionFit FitRationalImpedanceDispersion(const std::string &label,
-                                                       const Eigen::MatrixXcd &Mp_r,
-                                                       int idx) const;
+  // Exact-split fit for a frequency-dependent boundary mass term with an exact split of
+  // its scale (SurfaceTerms::ExactSplit), such as a rational surface impedance boundary:
+  // the Robin coefficient g(s) = s·D(s)/N(s) = P(s) + R(s)/N(s) (long division) has a
+  // polynomial part P that is exactly representable in the pencil when deg(P) <= 2 (for
+  // any passive input; the caller checks), so only the strictly proper remainder R/N is
+  // AAA-fit — directly.
+  WavePortDispersionFit
+  FitExactSplitDispersion(const std::string &label, const Eigen::MatrixXcd &Mp_r,
+                          const SurfaceTerms::ExactSplit &split) const;
 
   // Accumulate the polynomial-fit corrections of one frequency-dependent BC (a wave port,
   // or another BC) into the running Kr_corr, Cr_corr, Mr_corr buffers: folds α₀·Mp_r into
