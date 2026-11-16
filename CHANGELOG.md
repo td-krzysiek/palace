@@ -19,6 +19,16 @@ See the [developer notes on schema versioning](https://awslabs.github.io/palace/
 
 #### New Features
 
+  - Parallel rebalancing of conformal meshes of triangles and tetrahedra during adaptive
+    mesh refinement: the element graph is partitioned with PT-Scotch and the elements move
+    between the processes with `mfem::ParMesh::Rebalance` (MFEM change carried as a patch),
+    without gathering the mesh on the root process. The refinement flags of the tetrahedra
+    are kept (the gather path marks the tetrahedra anew at each rebalance). PT-Scotch is an
+    optional dependency (CMake `PALACE_WITH_SCOTCH`, Spack variant `+scotch`, off by
+    default). The new `config["Model"]["Refinement"]["RebalanceMethod"]` chooses between
+    `"Parallel"`, the default with PT-Scotch, and `"Gather"`, the previous rebalancing on
+    the root process. SchemaVer 4-4-0
+    [PR XXXX](https://github.com/awslabs/palace/pull/XXXX).
   - `validate-config` accepts several configuration files and validates them in one Julia
     session. [PR 1180](https://github.com/awslabs/palace/pull/1180).
   - Added `Boundaries.LumpedPort[].ExcitationAmplitude` and `ExcitationPhase` (degrees),
