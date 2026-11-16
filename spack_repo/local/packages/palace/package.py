@@ -557,6 +557,15 @@ class Palace(CMakePackage, CudaPackage, ROCmPackage):
         ],
     )
 
+    # The parallel rebalancing of conformal meshes of triangles and tetrahedra
+    # (ParMesh::Rebalance with a partition), until it is merged upstream. Declared after
+    # the patches above, so it is applied after them.
+    depends_on(
+        "mfem",
+        when="@0.20:",
+        patches=[patch("mfem_conforming_rebalance.diff", when="@4.10.0")],
+    )
+
     with when("+scotch"):
         depends_on("scotch@7.0.7:+mpi~metis build_system=cmake")
         depends_on("scotch+shared", when="+shared")

@@ -537,6 +537,13 @@ download_patch(MFEM_PATCH_FILES "${MFEM_PATCH_DIR}"
   7226ea4e223b0e2bd1bc4b21de93498f22b2d8c1dcb194415a377848f9200cc0
 )
 
+# The parallel rebalancing of conformal meshes of triangles and tetrahedra
+# (ParMesh::Rebalance with a partition), carried here until it is merged upstream. It must
+# be applied after the patches above.
+list(APPEND MFEM_PATCH_FILES
+  "${CMAKE_SOURCE_DIR}/extern/patch/mfem/mfem_conforming_rebalance.diff"
+)
+
 include(ExternalProject)
 ExternalProject_Add(mfem
   DEPENDS           ${MFEM_DEPENDENCIES}
