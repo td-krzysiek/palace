@@ -145,9 +145,35 @@ void Operator::AssembleDiagonal(Vector &diag) const
 namespace
 {
 
+void CeedReferenceApplyAdd(CeedOperator op, CeedVector u, CeedVector v)
+{
+  Ceed ceed;
+  PalaceCeedCallBackend(CeedOperatorGetCeed(op, &ceed));
+  bool composite;
+  PalaceCeedCall(ceed, CeedOperatorIsComposite(op, &composite));
+  if (composite)
+  {
+    CeedInt count;
+    CeedOperator *children;
+    PalaceCeedCall(ceed, CeedOperatorCompositeGetNumSub(op, &count));
+    PalaceCeedCall(ceed, CeedOperatorCompositeGetSubList(op, &children));
+    for (CeedInt i = 0; i < count; i++)
+    {
+      CeedReferenceApplyAdd(children[i], u, v);
+    }
+  }
+  else
+  {
+    CeedOperator fallback;
+    PalaceCeedCall(ceed, CeedOperatorGetFallback(op, &fallback));
+    PalaceCeedCall(ceed, CeedOperatorApplyAdd(fallback, u, v, CEED_REQUEST_IMMEDIATE));
+  }
+  PalaceCeedCallBackend(CeedDestroy(&ceed));
+}
+
 inline void CeedAddMult(const std::vector<CeedOperator> &op,
                         const std::vector<CeedVector> &u, const std::vector<CeedVector> &v,
-                        const Vector &x, Vector &y)
+                        const Vector &x, Vector &y, bool reference_action)
 {
   Ceed ceed;
   PalaceCeedCallBackend(CeedOperatorGetCeed(op[0], &ceed));
@@ -165,8 +191,17 @@ inline void CeedAddMult(const std::vector<CeedOperator> &op,
     PalaceCeedCall(ceed, CeedVectorSetArray(u[id], mem, CEED_USE_POINTER,
                                             const_cast<CeedScalar *>(x_data)));
     PalaceCeedCall(ceed, CeedVectorSetArray(v[id], mem, CEED_USE_POINTER, y_data));
-    PalaceCeedCall(ceed,
-                   CeedOperatorApplyAdd(op[id], u[id], v[id], CEED_REQUEST_IMMEDIATE));
+    const char *resource;
+    PalaceCeedCall(ceed, CeedGetResource(ceed, &resource));
+    if (reference_action && std::strncmp(resource, "/gpu/cuda/gen", 13) == 0)
+    {
+      CeedReferenceApplyAdd(op[id], u[id], v[id]);
+    }
+    else
+    {
+      PalaceCeedCall(ceed,
+                     CeedOperatorApplyAdd(op[id], u[id], v[id], CEED_REQUEST_IMMEDIATE));
+    }
     PalaceCeedCall(ceed, CeedVectorTakeArray(u[id], mem, nullptr));
     PalaceCeedCall(ceed, CeedVectorTakeArray(v[id], mem, nullptr));
   }
@@ -177,7 +212,7 @@ inline void CeedAddMult(const std::vector<CeedOperator> &op,
 void Operator::Mult(const Vector &x, Vector &y) const
 {
   y = 0.0;
-  CeedAddMult(op, u, v, x, y);
+  CeedAddMult(op, u, v, x, y, reference_action);
   if (dof_multiplicity.Size() > 0)
   {
     y *= dof_multiplicity;
@@ -191,7 +226,7 @@ void Operator::AddMult(const Vector &x, Vector &y, const double a) const
   {
     temp.SetSize(height);
     temp = 0.0;
-    CeedAddMult(op, u, v, x, temp);
+    CeedAddMult(op, u, v, x, temp, reference_action);
     {
       const auto *d_dof_multiplicity = dof_multiplicity.Read();
       const auto *d_temp = temp.Read();
@@ -202,7 +237,7 @@ void Operator::AddMult(const Vector &x, Vector &y, const double a) const
   }
   else
   {
-    CeedAddMult(op, u, v, x, y);
+    CeedAddMult(op, u, v, x, y, reference_action);
   }
 }
 
@@ -226,11 +261,11 @@ void Operator::AddMultTranspose(const Vector &x, Vector &y, const double a) cons
       mfem::forall(height, [=] MFEM_HOST_DEVICE(int i)
                    { d_temp[i] = d_dof_multiplicity[i] * d_x[i]; });
     }
-    CeedAddMult(op_t, v, u, temp, y);
+    CeedAddMult(op_t, v, u, temp, y, reference_action);
   }
   else
   {
-    CeedAddMult(op_t, v, u, x, y);
+    CeedAddMult(op_t, v, u, x, y, reference_action);
   }
 }
 

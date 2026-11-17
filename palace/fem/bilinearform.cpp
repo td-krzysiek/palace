@@ -4,6 +4,8 @@
 #include "bilinearform.hpp"
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include "fem/fespace.hpp"
 #include "fem/libceed/basis.hpp"
 #include "fem/libceed/ceed.hpp"
@@ -252,6 +254,16 @@ std::unique_ptr<ceed::Operator> DiscreteLinearOperator::PartialAssemble() const
   // Initialize the operator.
   auto op =
       std::make_unique<ceed::Operator>(test_fespace.GetVSize(), trial_fespace.GetVSize());
+
+  // Opt-in workaround for a cold discrete-curl application returning zero on the
+  // generated CUDA backend. Keep the main Maxwell operator and all other maps native.
+  const char *reference_curl = std::getenv("PALACE_CUDA_CURL_REFERENCE");
+  if (reference_curl && std::strcmp(reference_curl, "1") == 0 &&
+      trial_fespace.GetFEColl().GetMapType(mesh.Dimension()) == mfem::FiniteElement::H_CURL &&
+      test_fespace.GetFEColl().GetMapType(mesh.Dimension()) == mfem::FiniteElement::H_DIV)
+  {
+    op->SetReferenceAction(true);
+  }
 
   // Assemble the libCEED operator in parallel, each thread builds a composite operator.
   // This should work fine if some threads create an empty operator (no elements or boundary
