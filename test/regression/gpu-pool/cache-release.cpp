@@ -28,8 +28,14 @@ int main(int argc, char **argv)
     for (int i = 0; i < live.Size(); i++) MFEM_VERIFY(values[i] == 7.0, "Live allocation corrupted");
     const char *flag = std::getenv("PALACE_GPU_POOL_RELEASE_UNUSED");
     const bool enabled = flag && std::strcmp(flag, "1") == 0;
-    if (enabled) MFEM_VERIFY(after < 256ULL * 1024 * 1024 && after < peak, "Unused cache not released");
-    else MFEM_VERIFY(after >= 1024ULL * 1024 * 1024, "Default pool policy unexpectedly changed");
+    if (enabled)
+    {
+      MFEM_VERIFY(after < 256ULL * 1024 * 1024 && after < peak, "Unused cache not released");
+    }
+    else
+    {
+      MFEM_VERIFY(after >= 1024ULL * 1024 * 1024, "Default pool policy unexpectedly changed");
+    }
     if (Mpi::Root(Mpi::World()))
       std::cout << "POOL_JSON {\"enabled\":" << enabled << ",\"beforeBytes\":" << before
                 << ",\"peakBytes\":" << peak << ",\"afterBytes\":" << after << "}\n";
