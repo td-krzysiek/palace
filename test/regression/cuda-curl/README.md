@@ -15,3 +15,5 @@ PALACE_CUDA_CURL_REFERENCE=1 ./manufactured cuda swap /path/to/installed/include
 The final slash in the JIT source root is required by this Palace build. Run CPU and CUDA controls on one and four MPI ranks. Raw and swap modes assert the manufactured field. The unmodified generated CUDA control is expected to fail on the affected build; keep its output. Other modes investigate direct libCEED and first-use behavior and do not imply passing regression assertions.
 
 The opt-in workaround routes only three-dimensional H(curl) to H(div) discrete interpolator actions through each generated CUDA leaf's reference fallback, including transpose actions. It does not warm up or discard an application, change the main Maxwell operator, enable a global reference backend, or claim to repair the underlying libCEED generator. Default behavior remains unchanged. Generated-backend root-cause analysis remains open.
+
+`actions` additionally checks independent cold transpose/forward actions, transpose duality and both additive entry points. Run it on one and four CPU/CUDA ranks, enabling the explicit workaround for generated CUDA.

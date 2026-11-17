@@ -46,6 +46,21 @@ int main(int argc,char **argv)
     std::cerr<<"stage curl built\n";
     ComplexVector e(curl.Width()),b(curl.Height());e.UseDevice(true);b.UseDevice(true);
     gf.GetTrueDofs(e.Real());e.Imag()=e.Real();e.Imag()*=2.;b=0.;
+    if(mode=="actions")
+    {
+      Vector target(curl.Height()), ct(curl.Width()), cx(curl.Height());
+      target.UseDevice(true);ct.UseDevice(true);cx.UseDevice(true);target=.25;
+      // Both transpose and forward must be correct on their first application.
+      curl.MultTranspose(target,ct);curl.Mult(e.Real(),cx);
+      MFEM_VERIFY(linalg::Norml2(Mpi::World(),cx)>1.e-4,"Cold curl unexpectedly zero");
+      MFEM_VERIFY(linalg::Norml2(Mpi::World(),ct)>1.e-4,"Cold transpose unexpectedly zero");
+      const double lhs=linalg::Dot(Mpi::World(),cx,target),rhs=linalg::Dot(Mpi::World(),e.Real(),ct);
+      MFEM_VERIFY(std::abs(lhs-rhs)<1.e-10*(1.+std::abs(lhs)+std::abs(rhs)),"Curl transpose duality");
+      Vector sum(cx);curl.AddMult(e.Real(),sum);sum.Add(-2.,cx);
+      MFEM_VERIFY(linalg::Norml2(Mpi::World(),sum)<1.e-10,"Curl additive action");
+      Vector tsum(ct);curl.AddMultTranspose(target,tsum);tsum.Add(-2.,ct);
+      MFEM_VERIFY(linalg::Norml2(Mpi::World(),tsum)<1.e-10,"Curl additive transpose action");
+    }
     if(mode=="restriction-first")rt.GetRestrictionMatrix();
     if(mode=="local-first")
     {
