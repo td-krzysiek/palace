@@ -6,6 +6,8 @@
 #include "omp.hpp"
 
 #include <mfem.hpp>
+#include <cstdlib>
+#include <cstring>
 #if defined(MFEM_USE_UMPIRE)
 #include <umpire/ResourceManager.hpp>
 #include <umpire/strategy/QuickPool.hpp>
@@ -66,8 +68,27 @@ void ConfigureMemory(const std::string &device_str, int device_id)
     auto &rm = umpire::ResourceManager::getInstance();
     if (!rm.isAllocator(UMPIRE_DEVICE_POOL_NAME))
     {
-      rm.makeAllocator<umpire::strategy::QuickPool>(
-          UMPIRE_DEVICE_POOL_NAME, rm.getAllocator("DEVICE::" + std::to_string(device_id)));
+      const char *release_unused = std::getenv("PALACE_GPU_POOL_RELEASE_UNUSED");
+      if (release_unused && std::strcmp(release_unused, "1") == 0)
+      {
+        // Release completely unused backing blocks instead of retaining the high-water
+        // reservation. Live allocations and their addresses are untouched. Returning one
+        // requests release without refilling the pool to its previous size; zero means
+        // no coalescing action. This trades more allocation/synchronization work for VRAM.
+        using Pool = umpire::strategy::QuickPool;
+        constexpr std::size_t cache_bytes = 64ULL * 1024 * 1024;
+        auto trim = [](const Pool &pool) -> std::size_t
+        { return pool.getReleasableSize() >= cache_bytes ? 1 : 0; };
+        rm.makeAllocator<Pool>(UMPIRE_DEVICE_POOL_NAME,
+                              rm.getAllocator("DEVICE::" + std::to_string(device_id)),
+                              cache_bytes, std::size_t{1024 * 1024}, std::size_t{16}, trim);
+        Mpi::Print("GPU pool policy: release unused backing blocks (64 MiB cache target)\n");
+      }
+      else
+      {
+        rm.makeAllocator<umpire::strategy::QuickPool>(
+            UMPIRE_DEVICE_POOL_NAME, rm.getAllocator("DEVICE::" + std::to_string(device_id)));
+      }
     }
     mfem::MemoryManager::SetUmpireDeviceAllocatorName(UMPIRE_DEVICE_POOL_NAME);
     mfem::Device::SetMemoryTypes(mfem::MemoryType::HOST, mfem::MemoryType::DEVICE_UMPIRE);

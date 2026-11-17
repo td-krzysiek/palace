@@ -1,0 +1,7 @@
+# Opt-in unused GPU pool release
+
+`PALACE_GPU_POOL_RELEASE_UNUSED=1` selects a64MiB first backing allocation and a QuickPool release callback. Completely unused backing blocks totaling at least64MiB are released without refilling the previous high-water reservation. Live allocations and addresses are unchanged. Default GPU allocation policy and CPU configuration are unchanged. More cudaFree/allocation synchronization can reduce performance; smaller VRAM use is not a numerical accuracy improvement.
+
+Build cache-release.cpp with the Palace main compile flags and link against libpalace. Run fresh processes on one and four GPUs with the flag unset and set. The default control must retain its large freed scratch backing allocation; the opt-in control must release it and preserve a live vector. Also run matched CPU/GPU FEM field/port controls before adoption. A startup failure alone does not establish an upstream allocator defect, and this option does not bypass diagonal validation or resource guards.
+
+Observed motivating case: a2.151M tetrahedron p2 model on four10GiB GPUs reached approximately9.73GiB on one device and was stopped by the9GiB guard before GMRES; a Chebyshev finite-diagonal assertion also occurred. Their causal relationship is unresolved. Frozen input/build and both observations are preserved in the project experiment; no antenna/supplier data are included here. This policy is an experimental resource optimization, not a claimed repair of that assertion.
