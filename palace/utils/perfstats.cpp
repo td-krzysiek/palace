@@ -35,11 +35,6 @@ struct State
   std::set<std::string> info_paths;
   std::set<std::string> counter_paths;  // All counter paths written by the report so far
 
-  // Peak memory bookkeeping (rank-local), see IterationPeakMemory.
-  long peak_at_start = 0, cur_at_start = 0;
-  double cum_peak = 0.0;
-  double cum_node_peak = 0.0, last_node_peak = 0.0;
-
   // Sums over the previous iterations of the reported counts (maxima over ranks), see
   // TimerResults: per timer row, per tally name and per counter path (counters reduced as
   // SUM, MIN or MAX and accumulated as SUM).
@@ -264,23 +259,6 @@ double AccumulateValue(Accumulate acc, double cum, bool cum_set, double v, bool 
   return v;
 }
 
-// Peak RSS of this rank within the current iteration, and whether it is exact. The peak RSS
-// of the process is not reset (the reset would also change the peak seen by getrusage,
-// wait4 and the accounting of job schedulers): a peak of the iteration which did not raise
-// it is unknown and bounded below by the RSS at the iteration boundaries and at the timer
-// events and memory probes where it was sampled (rss_sampled, see Timer::RssSampled).
-std::pair<double, bool> IterationPeakMemory(long rss_sampled)
-{
-  const long peak = memory_reporting::GetPeakMemory();
-  if (peak > state.peak_at_start)
-  {
-    return {static_cast<double>(peak), true};
-  }
-  return {static_cast<double>(std::max(
-              {state.cur_at_start, rss_sampled, memory_reporting::GetCurrentMemory()})),
-          false};
-}
-
 json Num(double v)
 {
   if (std::isfinite(v) && v == std::round(v) && std::abs(v) < 9.0e15)
@@ -428,14 +406,6 @@ json PeakJson(const Stats &s, bool node)
           {"Max", s.max * to_mb},
           {"Sum", s.sum * to_mb},
           {node ? "MaxNode" : "MaxRank", s.max_rank}};
-}
-
-// Peak memory of the iteration, flagged as a lower bound if it is for any process.
-json IterationPeakJson(const Stats &s, bool node, bool lower_bound)
-{
-  auto j = PeakJson(s, node);
-  j["LowerBound"] = lower_bound;
-  return j;
 }
 
 // Whether the Cumulative value of a counter is the sum of its reported iteration values.
@@ -680,15 +650,11 @@ void WriteJson(json &meta)
     meta["PeakNodeMemoryGrowthMegabytes"]["Sum"][key] = nm.sum * to_mb;
     meta["PeakNodeMemoryGrowthMegabytes"]["MaxNode"][key] = nm.max_rank;
   }
-  meta["PeakMemoryMegabytes"] =
-      IterationPeakJson(r.peak_mem, false, r.peak_lower_bound > 0);
-  meta["PeakNodeMemoryMegabytes"] =
-      IterationPeakJson(r.peak_node_mem, true, r.peak_lower_bound > 0);
+  meta["PeakMemoryMegabytes"] = PeakJson(r.peak_mem, false);
+  meta["PeakNodeMemoryMegabytes"] = PeakJson(r.peak_node_mem, true);
 
   json cum;
   cum["ElapsedTime"] = ElapsedTimeJson(r.cum);
-  cum["PeakMemoryMegabytes"] = PeakJson(r.cum_peak_mem, false);
-  cum["PeakNodeMemoryMegabytes"] = PeakJson(r.cum_peak_node_mem, true);
   for (std::size_t i = 0; i < r.counter_paths.size(); i++)
   {
     if (r.counter[i].n > 0)
@@ -741,9 +707,9 @@ void BlockTimer::Finalize(MPI_Comm comm)
   constexpr int N = Timer::NUM_TIMINGS;
   auto [tidx, tkeys, cidx, ckeys] = CanonicalOrder(comm);
   const int T = static_cast<int>(tidx.size()), C = static_cast<int>(cidx.size());
-  const auto [iter_peak, peak_exact] = IterationPeakMemory(timer.RssSampled());
-  const double cur_mem = static_cast<double>(memory_reporting::GetCurrentMemory());
-  const double cum_peak = std::max(state.cum_peak, iter_peak);
+  // The peak RSS of the process, not reset at iterations: resetting it would also change
+  // the peak seen by getrusage, wait4 and job schedulers.
+  const double peak = static_cast<double>(memory_reporting::GetPeakMemory());
   double phase_mem = 0.0;
   for (int i = 0; i < N; i++)
   {
@@ -753,11 +719,11 @@ void BlockTimer::Finalize(MPI_Comm comm)
     }
   }
   const double total_mem = static_cast<double>(timer.MemoryData(Timer::TOTAL));
-  const double baseline_mem = iter_peak - total_mem, unattr_mem = total_mem - phase_mem;
+  const double baseline_mem = peak - total_mem, unattr_mem = total_mem - phase_mem;
 
   // Pack everything into one buffer for a single reduction.
   std::vector<double> buf;
-  buf.reserve(STRIDE * (5 * N + 8 * T + 2 * C + 6));
+  buf.reserve(STRIDE * (5 * N + 8 * T + 2 * C + 3));
   for (int i = 0; i < N; i++)
   {
     PushEntry(buf, timer.Data(static_cast<Timer::Index>(i)), true, rank);
@@ -791,9 +757,7 @@ void BlockTimer::Finalize(MPI_Comm comm)
     const auto *c = (cidx[i] >= 0) ? &reg.counters[cidx[i]] : nullptr;
     PushEntry(buf, c ? c->value : 0.0, c && c->set, rank);
   }
-  PushEntry(buf, iter_peak, true, rank);
-  PushEntry(buf, cur_mem, true, rank);
-  PushEntry(buf, peak_exact ? 0.0 : 1.0, true, rank);
+  PushEntry(buf, peak, true, rank);
   for (int i = 0; i < N; i++)
   {
     PushEntry(buf, timer.CumulativeData(static_cast<Timer::Index>(i)), true, rank);
@@ -827,40 +791,34 @@ void BlockTimer::Finalize(MPI_Comm comm)
     PushEntry(buf, c ? AccumulateValue(c->acc, c->cum, c->cum_set, c->value, c->set) : 0.0,
               c && (c->cum_set || c->set), rank);
   }
-  PushEntry(buf, cum_peak, true, rank);
   PushEntry(buf, baseline_mem, true, rank);
   PushEntry(buf, unattr_mem, true, rank);
   StatsAllreduce(buf, comm);
 
   // Node memory: sum over the ranks of each node, then statistics over nodes.
   const auto &nc = memory_reporting::GetNodeComms(comm);
-  std::vector<double> node_local(N + 4), node_sum(N + 4, 0.0);
+  std::vector<double> node_local(N + 3), node_sum(N + 3, 0.0);
   for (int i = 0; i < N; i++)
   {
     node_local[i] = static_cast<double>(timer.MemoryData(static_cast<Timer::Index>(i)));
   }
-  node_local[N] = iter_peak;
-  node_local[N + 1] = cur_mem;
-  node_local[N + 2] = baseline_mem;
-  node_local[N + 3] = unattr_mem;
-  MPI_Reduce(node_local.data(), node_sum.data(), N + 4, MPI_DOUBLE, MPI_SUM, 0, nc.node);
+  node_local[N] = peak;
+  node_local[N + 1] = baseline_mem;
+  node_local[N + 2] = unattr_mem;
+  MPI_Reduce(node_local.data(), node_sum.data(), N + 3, MPI_DOUBLE, MPI_SUM, 0, nc.node);
   std::vector<double> node_buf;
   if (nc.leaders != MPI_COMM_NULL)
   {
     const int node_idx = Mpi::Rank(nc.leaders);
-    for (int i = 0; i < N + 4; i++)
+    for (int i = 0; i < N + 3; i++)
     {
       PushEntry(node_buf, node_sum[i], true, node_idx);
     }
-    PushEntry(node_buf, std::max(state.cum_node_peak, node_sum[N]), true, node_idx);
-    PushEntry(node_buf, node_sum[N], true, node_idx);  // Local node peak, not reduced
-    std::vector<double> tmp(node_buf.begin(), node_buf.end() - STRIDE);
-    StatsAllreduce(tmp, nc.leaders);
-    std::copy(tmp.begin(), tmp.end(), node_buf.begin());
+    StatsAllreduce(node_buf, nc.leaders);
   }
   else
   {
-    node_buf.resize(STRIDE * (N + 6));
+    node_buf.resize(STRIDE * (N + 3));
   }
   MPI_Bcast(node_buf.data(), static_cast<int>(node_buf.size()), MPI_DOUBLE, 0, nc.node);
 
@@ -906,25 +864,19 @@ void BlockTimer::Finalize(MPI_Comm comm)
   NextTallyExtras(r.iter, T);
   NextN(r.counter, C);
   r.peak_mem = Next();
-  r.cur_mem = Next();
-  r.peak_lower_bound = static_cast<int>(Next().sum);
   NextN(r.cum.time, N);
   NextN(r.cum.count, N);
   NextN(r.cum.tally_time, T);
   NextN(r.cum.tally_count, T);
   NextTallyExtras(r.cum, T);
   NextN(r.cum_counter, C);
-  r.cum_peak_mem = Next();
   r.mem_baseline = Next();
   r.mem_unattributed = Next();
   e = node_buf.data();
   NextN(r.iter.node_mem, N);
   r.peak_node_mem = Next();
-  r.cur_node_mem = Next();
   r.node_mem_baseline = Next();
   r.node_mem_unattributed = Next();
-  r.cum_peak_node_mem = Next();
-  state.last_node_peak = e[2];  // This node's own peak (sum of its ranks)
   r.num_nodes = r.peak_node_mem.n;
   r.cum.rank_mem = r.iter.rank_mem;
   r.cum.node_mem = r.iter.node_mem;
@@ -970,13 +922,9 @@ void BlockTimer::Finalize(MPI_Comm comm)
 void BlockTimer::StartIteration()
 {
   using namespace perf;
-  state.cum_peak = std::max(state.cum_peak, IterationPeakMemory(timer.RssSampled()).first);
-  state.cum_node_peak = std::max(state.cum_node_peak, state.last_node_peak);
   CommitCounts();
   Commit();
   state.info = json::object();
-  state.peak_at_start = memory_reporting::GetPeakMemory();
-  state.cur_at_start = memory_reporting::GetCurrentMemory();
   timer.StartIteration();
   state.iteration++;
   detail::iteration_serial++;
@@ -1005,9 +953,6 @@ void BlockTimer::Reset()
   detail::registry.suspended = false;
   detail::iteration_serial++;
   state = State();
-  // A peak of the process reached before (by a previous run) is not part of this run.
-  state.peak_at_start = memory_reporting::GetPeakMemory();
-  state.cur_at_start = memory_reporting::GetCurrentMemory();
 }
 
 void BlockTimer::Print(MPI_Comm comm)
@@ -1059,14 +1004,14 @@ void BlockTimer::Print(MPI_Comm comm)
   {
     Mpi::Print(comm,
                "\nPerformance report after iteration {:d}: elapsed times are totals over "
-               "iterations 1-{:d}, peak memory is for iteration {:d} only\n",
+               "iterations 1-{:d}, peak memory grows from the start of iteration {:d}\n",
                r.iteration, r.iteration, r.iteration);
   }
   Table("Elapsed Time Report (s)", "Min.", "Max.", "Avg.", r.cum, TimeRow(r.cum));
 
   // Memory table for this iteration: per-node max and total across nodes of the peak RSS
   // growth of each row, and the running total high-water mark across nodes, from the peak
-  // at the start of the iteration (Baseline) to the peak of the iteration (Total).
+  // at the start of the iteration (Baseline) to the peak at its end (Total).
   const auto &nb = r.node_mem_baseline;
   double hwm = nb.sum;
   const Row baseline = {memory_reporting::FormatBytes(nb.max),
@@ -1086,14 +1031,6 @@ void BlockTimer::Print(MPI_Comm comm)
                 memory_reporting::FormatBytes((i == Timer::TOTAL) ? nb.sum + nm.sum : hwm)};
       },
       &baseline);
-  if (r.peak_lower_bound > 0)
-  {
-    Mpi::Print(
-        comm,
-        "The peak RSS did not grow in this iteration on {:d} process{}: the largest RSS "
-        "sampled is a lower bound of its peak\n",
-        r.peak_lower_bound, (r.peak_lower_bound > 1) ? "es" : "");
-  }
 
   // This iteration alone, when it differs from the totals.
   if (r.iteration > 1)

@@ -288,8 +288,6 @@ TEST_CASE("PerfStats Per-Iteration And Cumulative", "[perfstats][Serial][Paralle
   CHECK_THAT(r.cum.time[Timer::TOTAL].avg,
              WithinRel(total1 + r.iter.time[Timer::TOTAL].avg, 1e-12));
   CHECK(r.iter.time[Timer::TOTAL].avg < r.cum.time[Timer::TOTAL].avg);
-  CHECK(r.cum_peak_mem.max >= r.peak_mem.max);
-  CHECK(r.cum_peak_node_mem.max >= r.peak_node_mem.max);
 
   // Per-iteration values replace the previous iteration's, stale keys are removed, and
   // Cumulative holds the totals.
@@ -324,8 +322,8 @@ TEST_CASE("PerfStats Per-Iteration And Cumulative", "[perfstats][Serial][Paralle
   }
   CHECK(!meta["PeakNodeMemoryGrowthMegabytes"]["Max"].contains("INIT"));
   CHECK(meta["PeakNodeMemoryGrowthMegabytes"]["MaxNode"].contains("IO"));
-  CHECK(meta["PeakMemoryMegabytes"]["Max"].get<double>() <=
-        meta["Cumulative"]["PeakMemoryMegabytes"]["Max"].get<double>());
+  CHECK(meta["PeakMemoryMegabytes"]["Max"].is_number());
+  CHECK(!meta["Cumulative"].contains("PeakMemoryMegabytes"));
   BlockTimer::Reset();
 }
 

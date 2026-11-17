@@ -465,10 +465,9 @@ void BaseSolver::ReportPerformance(MPI_Comm comm) const
                                          s.avg};
   };
   Mpi::Print(comm, "\n");
+  memory_reporting::PrintMemoryUsage(comm, ToMemoryStats("peak per-rank", res.peak_mem));
   memory_reporting::PrintMemoryUsage(comm,
-                                     ToMemoryStats("peak per-rank", res.cum_peak_mem));
-  memory_reporting::PrintMemoryUsage(comm,
-                                     ToMemoryStats("peak per-node", res.cum_peak_node_mem));
+                                     ToMemoryStats("peak per-node", res.peak_node_mem));
   BlockTimer::Print(comm);
   if (root)
   {

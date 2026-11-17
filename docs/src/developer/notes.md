@@ -430,7 +430,7 @@ simulation. It has three columns:
 
 Its first row, Baseline, is the peak RSS at the start of the iteration (of the process, for
 the first one), from which Total HWM grows: in the Total row, it is the peak RSS of the
-iteration summed across all the nodes.
+process at the end of the iteration summed across all the nodes.
 
 The `BlockTimer` constructor accepts a `count` parameter (default `true`). When `count` is
 `false`, both timing and memory tracking are disabled for that scope. This can be used to
@@ -446,10 +446,10 @@ processes once per report, in `BlockTimer::Finalize`, with no other synchronizat
 adaptive mesh refinement, the top level of each `iterationX/palace.json` describes that
 iteration only, as if it were a simulation of its own: `BlockTimer::StartIteration`
 restarts all times, counts and tallies, and the work between iterations is charged to the
-iteration using the new mesh. The `palace.json` of the output directory is the report of
+iteration using the new mesh. The peak memory is the exception, see below. The `palace.json` of the output directory is the report of
 the last iteration, **not of the whole run**: the run so far is in the `Cumulative` block of each
-report, with the same layout as the top level (`ElapsedTime`, the peak memory and the
-counters) holding sums over iterations for times and counts and the maximum for peak memory.
+report, with the same layout as the top level (`ElapsedTime` and the counters) holding sums
+over iterations for times and counts.
 Times are additive: the `Durations` (average over processes) of the iterations add up to
 those of `Cumulative`, including `TOTAL`. `Min`, `Max` and `MaxRank` in `Cumulative` are
 over each process's own totals.
@@ -464,13 +464,11 @@ statistics over processes of each process's total.
 
 The peak RSS of the process is not reset at the start of an iteration: *Palace* does not use
 `/proc/self/clear_refs`, which would also change the peak that `getrusage`, `wait4` and job
-schedulers report. The peak of an iteration is the peak RSS of the process (`getrusage`) if
-it grew in the iteration, and otherwise unknown: it is then bounded below by the largest RSS
-sampled in the iteration (at its boundaries, at timer events while the peak did not grow, at
-most every 0.1 s, and at the memory probes), flagged with `"LowerBound": true` in
-`PeakMemoryMegabytes` and `PeakNodeMemoryMegabytes`. The same holds for a run after another
-one in the same process (`BlockTimer::Reset`). The peak in `Cumulative` is the maximum over
-iterations, exact for the run if any iteration was. The log's "Elapsed Time Report" table
+schedulers report. `PeakMemoryMegabytes` and `PeakNodeMemoryMegabytes` are therefore the
+peak RSS of the process (`getrusage`) at the end of the iteration, and the per-row growth is
+how much each row raised it in the iteration: an iteration which needs less memory than an
+earlier one shows no growth, its peak being all `Baseline`. The peak is thus not part of
+`Cumulative`. The log's "Elapsed Time Report" table
 holds the totals over iterations so far, while the "Peak Memory" table is per iteration;
 from the second iteration on, an "Iteration N" table gives the times of the iteration alone.
 A timer row which was not used (zero count on all processes) in the iteration, or for the

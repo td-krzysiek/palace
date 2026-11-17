@@ -80,7 +80,7 @@ TEST_CASE("PerfProbes Peak Memory Of Later Iterations", "[perfprobes][perfstats]
 {
   // The peak RSS of the process is not reset at the start of an iteration (the reset would
   // also change the peak seen by getrusage and the accounting of job schedulers). The peak
-  // of an iteration which does not raise it is flagged as a lower bound.
+  // of an iteration is that of the process: one which does not raise it is all baseline.
   MPI_Comm comm = Mpi::World();
   BlockTimer::Reset();
   static char *volatile escape = nullptr;  // Keeps the allocation from being elided
@@ -98,9 +98,7 @@ TEST_CASE("PerfProbes Peak Memory Of Later Iterations", "[perfprobes][perfstats]
     SKIP("The peak RSS is not above the RSS after the allocation is freed");
   }
   BlockTimer::Finalize(comm);
-  CHECK(perf::GetResults().peak_lower_bound == 0);
   BlockTimer::StartIteration();
-  CHECK(memory_reporting::GetPeakMemory() >= peak);
   {
     BlockTimer bt(Timer::IO);
     std::vector<char> small(1 << 20, 1);
@@ -108,14 +106,14 @@ TEST_CASE("PerfProbes Peak Memory Of Later Iterations", "[perfprobes][perfstats]
   }
   BlockTimer::Finalize(comm);
   const auto &r = perf::GetResults();
-  CHECK(r.peak_lower_bound == 1);
-  CHECK(r.peak_mem.max < peak);
-  CHECK(r.cum_peak_mem.max >= peak);
+  CHECK(r.peak_mem.max >= peak);
+  CHECK_THAT(r.mem_baseline.max, WithinAbs(r.peak_mem.max, 1.0));
+  CHECK(r.iter.rank_mem[Timer::IO].max == 0.0);
+  CHECK(r.mem_unattributed.max == 0.0);
   nlohmann::json meta = nlohmann::json::object();
   perf::WriteJson(meta);
-  CHECK(meta["PeakMemoryMegabytes"]["LowerBound"] == true);
-  CHECK(meta["PeakNodeMemoryMegabytes"]["LowerBound"] == true);
-  CHECK(!meta["Cumulative"]["PeakMemoryMegabytes"].contains("LowerBound"));
+  CHECK(!meta["PeakMemoryMegabytes"].contains("LowerBound"));
+  CHECK(!meta["Cumulative"].contains("PeakMemoryMegabytes"));
 #if defined(__linux__)
   // The high-water mark of the kernel is kept as well.
   std::ifstream status("/proc/self/status");
@@ -130,43 +128,6 @@ TEST_CASE("PerfProbes Peak Memory Of Later Iterations", "[perfprobes][perfstats]
   }
   CHECK(hwm >= peak);
 #endif
-  escape = nullptr;
-  BlockTimer::Reset();
-}
-
-TEST_CASE("PerfProbes Peak Memory After Reset", "[perfprobes][perfstats][Serial]")
-{
-  // A peak of the process reached before a Reset (by a previous run in the same process)
-  // is not the peak of the next run: it is flagged as a lower bound, bounded below by the
-  // RSS sampled in the run, such as by a memory probe.
-  MPI_Comm comm = Mpi::World();
-  static char *volatile escape = nullptr;  // Keeps the allocation from being elided
-  {
-    constexpr std::size_t n = 256 << 20;
-    std::unique_ptr<char[]> big(new char[n]);
-    std::memset(big.get(), 1, n);
-    escape = big.get();
-  }
-  const long peak = memory_reporting::GetPeakMemory();
-  if (peak < memory_reporting::GetCurrentMemory() + (64l << 20))
-  {
-    SKIP("The peak RSS is not above the RSS after the allocation is freed");
-  }
-  BlockTimer::Reset();
-  std::vector<char> keep;
-  long rss = 0;
-  {
-    BlockTimer bt(Timer::CONSTRUCT);
-    perf::ScopedMemoryProbe probe("Test/AfterReset");
-    keep.assign(16 << 20, 1);
-    rss = memory_reporting::GetCurrentMemory();
-  }
-  keep = std::vector<char>();
-  BlockTimer::Finalize(comm);
-  const auto &r = perf::GetResults();
-  CHECK(r.peak_lower_bound == 1);
-  CHECK(r.peak_mem.max < peak);
-  CHECK(r.peak_mem.max >= 0.99 * rss);  // The RSS at the end of the probe
   escape = nullptr;
   BlockTimer::Reset();
 }

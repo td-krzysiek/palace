@@ -4,7 +4,6 @@
 #ifndef PALACE_UTILS_TIMER_HPP
 #define PALACE_UTILS_TIMER_HPP
 
-#include <algorithm>
 #include <array>
 #include <chrono>
 #include <string>
@@ -121,20 +120,13 @@ private:
   std::vector<Duration> cum_data;
   std::vector<long> cum_counts;
 
-  // Largest RSS sampled in the iteration, a lower bound of its peak: at timer events while
-  // the peak RSS had not grown since the iteration start (at most every rss_interval
-  // seconds, reading the RSS costs a system call and a parse) and at memory probes.
-  static constexpr double rss_interval = 0.1;
-  long rss_sampled = 0;
-  TimePoint last_rss_sample;
-
 public:
   Timer()
     : start_time(Now()), iteration_start_time(start_time), iteration_end_time(start_time),
       last_lap_time(start_time), data(NUM_TIMINGS), counts(NUM_TIMINGS),
       iteration_start_memory(memory_reporting::GetPeakMemory()),
       last_memory(iteration_start_memory), mem_data(NUM_TIMINGS, 0), cum_data(NUM_TIMINGS),
-      cum_counts(NUM_TIMINGS, 0), last_rss_sample(start_time)
+      cum_counts(NUM_TIMINGS, 0)
   {
   }
 
@@ -230,24 +222,6 @@ public:
   // Provide read-only access to the memory data (bytes) for a given phase.
   auto MemoryData(Index idx) const { return mem_data[idx]; }
 
-  // At a timer event, sample the RSS for the lower bound of the peak of the iteration if
-  // the peak RSS has not grown in the iteration (and not sampled in the last rss_interval).
-  void SampleRss()
-  {
-    if (last_memory <= iteration_start_memory &&
-        Duration(last_lap_time - last_rss_sample).count() >= rss_interval)
-    {
-      last_rss_sample = last_lap_time;
-      NoteRss(memory_reporting::GetCurrentMemory());
-    }
-  }
-
-  // Record an RSS (bytes) measured in the current iteration, for example by a memory probe.
-  void NoteRss(long rss) { rss_sampled = std::max(rss_sampled, rss); }
-
-  // Largest RSS sampled in the current iteration.
-  long RssSampled() const { return rss_sampled; }
-
   // Fold the current iteration into the cumulative totals and restart counting from zero.
   // The new iteration starts at the end of the previous one, so that iteration totals add
   // up. The memory baseline is the peak RSS at the call.
@@ -266,8 +240,6 @@ public:
     }
     iteration_start_time = iteration_end_time;
     iteration_start_memory = last_memory = memory_reporting::GetPeakMemory();
-    rss_sampled = 0;
-    last_rss_sample = last_lap_time;
   }
 };
 
@@ -307,7 +279,6 @@ public:
         timer.MarkTime(stack.back(), false);
         timer.MarkMemory(stack.back(), timer.MemoryLap());
       }
-      timer.SampleRss();
       stack.push_back(i);
     }
   }
@@ -319,17 +290,12 @@ public:
     {
       timer.MarkTime(stack.back());
       timer.MarkMemory(stack.back());
-      timer.SampleRss();
       stack.pop_back();
     }
   }
 
   // Read-only access the static Timer object.
   static const Timer &GlobalTimer() { return timer; }
-
-  // Record an RSS measured in the current iteration (for memory probes), for the lower
-  // bound of its peak.
-  static void NoteRss(long rss) { timer.NoteRss(rss); }
 
   // The exclusive row currently being timed (STARTUP before the first timer, TOTAL between
   // top-level timers).

@@ -57,7 +57,6 @@ void MemoryProbe::Start()
 {
   cur0 = memory_reporting::GetCurrentMemory();
   hwm0 = memory_reporting::GetPeakMemory();
-  BlockTimer::NoteRss(cur0);
   active = true;
 }
 
@@ -68,7 +67,6 @@ void MemoryProbe::Stop()
     return;
   }
   const long cur1 = memory_reporting::GetCurrentMemory();
-  BlockTimer::NoteRss(cur1);
   const long hwm1 = memory_reporting::GetPeakMemory();
   persistent += static_cast<double>(cur1 - cur0);
   growth += static_cast<double>(hwm1 - hwm0);

@@ -317,15 +317,11 @@ struct Results
 {
   int iteration = 1;
   int num_nodes = 0;
-  int peak_lower_bound = 0;  // Processes whose peak of the iteration is only a lower bound
-  TimerResults iter, cum;    // This iteration and iterations 1..N
-  Stats peak_mem, cur_mem;   // Per-rank peak (this iteration) and current RSS
-  Stats peak_node_mem, cur_node_mem;
-  Stats cum_peak_mem, cum_peak_node_mem;  // Max over iterations
-  // Peak memory attribution: peak = baseline (peak RSS at the iteration start) + sum of the
-  // per-row growth + unattributed growth (outside any timer row). If the peak RSS of a
-  // process did not grow in the iteration, its peak is the lower bound of the RSS sampled
-  // instead, and it is all baseline.
+  TimerResults iter, cum;  // This iteration and iterations 1..N
+  // Peak RSS of the process at the end of the iteration (not reset at iterations), per rank
+  // and per node: baseline (the peak at the iteration start) + sum of the per-row growth +
+  // unattributed growth (outside any timer row).
+  Stats peak_mem, peak_node_mem;
   Stats mem_baseline, mem_unattributed, node_mem_baseline, node_mem_unattributed;
   std::vector<std::string> counter_paths;
   std::vector<Reduce> counter_reduce;
