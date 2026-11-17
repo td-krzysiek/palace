@@ -37,6 +37,12 @@ endif()
 string(REPLACE ";" "; " SCOTCH_OPTIONS_PRINT "${SCOTCH_OPTIONS}")
 message(STATUS "SCOTCH_OPTIONS: ${SCOTCH_OPTIONS_PRINT}")
 
+# The changes sent to Scotch, for v7.0.18: five fixes, a random matching order, sequential
+# and parallel maximum flow refinement, and the strategy builder that uses them
+set(SCOTCH_PATCH_FILES
+  "${CMAKE_SOURCE_DIR}/extern/patch/scotch/scotch_parallel_flow_refinement.diff"
+)
+
 include(ExternalProject)
 ExternalProject_Add(scotch
   DEPENDS           ${SCOTCH_DEPENDENCIES}
@@ -47,6 +53,7 @@ ExternalProject_Add(scotch
   INSTALL_DIR       ${CMAKE_INSTALL_PREFIX}
   PREFIX            ${CMAKE_BINARY_DIR}/extern/scotch-cmake
   UPDATE_COMMAND    ""
+  PATCH_COMMAND     git apply "${SCOTCH_PATCH_FILES}"
   CONFIGURE_COMMAND ${CMAKE_COMMAND} <SOURCE_DIR> "${SCOTCH_OPTIONS}"
   # Install the libraries, without the Scotch programs and manual pages
   INSTALL_COMMAND
