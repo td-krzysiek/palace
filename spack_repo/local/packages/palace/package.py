@@ -586,6 +586,22 @@ class Palace(CMakePackage, CudaPackage, ROCmPackage):
         depends_on("scotch+int64", when="+int64")
         depends_on("scotch~int64", when="~int64")
 
+    # The changes sent to Scotch, for 7.0.18 (extern/patch/scotch, as in the superbuild). Kept
+    # off the `with` block so that +scotch is not folded into the patch condition.
+    depends_on(
+        "scotch",
+        when="+scotch",
+        patches=[
+            patch(
+                "https://raw.githubusercontent.com/awslabs/palace/"
+                "175d594c7af9f894651469b8e2df3606d02d4f44/extern/patch/scotch/"
+                "scotch_parallel_flow_refinement.diff",
+                sha256="2c969ac160b10bcb4e562759b28dfd5c59c8f3d906828ba90da792afb08c4a86",
+                when="@7.0.18",
+            )
+        ],
+    )
+
     with when("@0.16:"):
         depends_on("mfem+shared", when="+shared")
         depends_on("mfem~shared", when="~shared")
