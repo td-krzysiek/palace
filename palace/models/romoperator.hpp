@@ -416,6 +416,13 @@ protected:
   void PrintPortReferenceData(const Units &units, const fs::path &post_dir,
                               const NormalizedMatrices &matrices) const;
 
+  // Rows of the Schur complement for the reference admittance of a wave port, from its load
+  // Y = L⁻¹/s + R⁻¹ + s·C on the total labels: the physical row `phys` first, then the
+  // basis rows which the port's projected boundary mass Mp_r couples and the rows of the
+  // port's aux states.
+  static std::vector<long> WavePortLoadRows(const Eigen::MatrixXcd &Y,
+                                            const Eigen::MatrixXcd &Mp_r, long phys);
+
   // Sample kₙ,ₚ(ω) on the sweep band, fit a quadratic, run AAA on the residual when
   // augmenting, and pack the result. The dense-grid residual is captured for both
   // regimes for diagnostic logging.

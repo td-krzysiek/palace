@@ -2755,6 +2755,28 @@ RomOperator::CalculateNormalizedPROMMatrices(const Units &units) const
   return out;
 }
 
+std::vector<long> RomOperator::WavePortLoadRows(const Eigen::MatrixXcd &Y,
+                                                const Eigen::MatrixXcd &Mp_r, long phys)
+{
+  // An internal row is a full constraint whatever its size: the Schur complement does not
+  // change when an internal row and column are scaled. So the basis rows come from Mp_r,
+  // which is exactly zero in the rows of basis vectors without support on the port, such
+  // as the mode of another port, where the load has roundoff from the dense factorizations
+  // of the modal correction and the aux-state directions. The aux states of other ports
+  // and boundaries are exactly zero rows of the load.
+  std::vector<long> rows{phys};
+  for (long i = 0; i < Y.rows(); i++)
+  {
+    const Eigen::MatrixXcd &A = (i < Mp_r.rows()) ? Mp_r : Y;
+    if (i != phys &&
+        (A.row(i).cwiseAbs().maxCoeff() > 0.0 || A.col(i).cwiseAbs().maxCoeff() > 0.0))
+    {
+      rows.push_back(i);
+    }
+  }
+  return rows;
+}
+
 void RomOperator::PrintPortReferenceData(const Units &units, const fs::path &post_dir,
                                          const NormalizedMatrices &matrices) const
 {
@@ -2849,18 +2871,9 @@ void RomOperator::PrintPortReferenceData(const Units &units, const fs::path &pos
       Y += *load_it->R_inv;
     }
 
-    // Order the physical port row first, then any internal (imag/aux) rows carrying load,
-    // and Schur-complement the internal rows onto the physical row for the terminal
-    // admittance.
-    std::vector<long> rows{phys};
-    for (long i = 0; i < Y.rows(); i++)
-    {
-      if (i != phys &&
-          (Y.row(i).cwiseAbs().maxCoeff() > 0.0 || Y.col(i).cwiseAbs().maxCoeff() > 0.0))
-      {
-        rows.push_back(i);
-      }
-    }
+    // Order the physical port row first, then the internal rows of the load, and
+    // Schur-complement the internal rows onto the physical row for the terminal admittance.
+    const auto rows = WavePortLoadRows(Y, Mwp_p_r.at(ref.port_idx), phys);
     const long n = static_cast<long>(rows.size());
     Eigen::MatrixXcd Ys(n, n);
     for (long i = 0; i < n; i++)

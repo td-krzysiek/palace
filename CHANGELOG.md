@@ -179,6 +179,12 @@ See the [developer notes on schema versioning](https://awslabs.github.io/palace/
 
 #### Bug Fixes
 
+  - Fixed the reference admittance `Y_ref` of wave ports in `rom-port-reference.csv` with
+    `"AdaptiveCircuitSynthesis"`, which took the rows of the port's load that hold only
+    roundoff, such as the rows of the modes of the other ports, as internal nodes. Each such
+    row constrained `Y_ref` in a direction set by roundoff: for a symmetric two-port coaxial
+    line, `Y_ref` of one port was 24% off that of the other. The synthesized circuit is
+    unchanged. [PR 1217](https://github.com/awslabs/palace/pull/1217).
   - Fixed the flux recovery in the error estimators to use the projection which minimizes the
     error it is measured in (ε⁻¹-weighted for the electric flux, μ-weighted for the magnetic
     field). The unweighted projection overestimated the error in the low-permittivity

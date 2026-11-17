@@ -67,6 +67,7 @@ public:
   using RomOperator::RomOperator;
   using RomOperator::WavePortAuxBlock;
   using RomOperator::WavePortDispersionFit;
+  using RomOperator::WavePortLoadRows;
   auto &GetWeightOp() const { return weight_op_W; }
   auto &GetOrthR() const { return orth_R; }
   auto &GetVectors() const { return V; }
@@ -1921,4 +1922,30 @@ TEST_CASE("RomOperator-AugmentedPencil-Eigenvalues", "[romoperator][Serial]")
   };
   CHECK(std::abs(eval_unaug(root_plus)) < 1.0e-10);
   CHECK(std::abs(eval_unaug(root_minus)) < 1.0e-10);
+}
+
+// The reference admittance of a wave port is the Schur complement of the port's load onto
+// its physical row, and an internal row constrains it whatever the size of the row. So a
+// row which is only roundoff, like the mode of another port, must not be internal, and a
+// small row which the boundary mass of the port couples must be.
+TEST_CASE("RomOperator-WavePortLoadRows", "[romoperator][Serial]")
+{
+  // Rows: the mode of another port, the mode of this port (the physical row), a sample, an
+  // aux state of this port, and an aux state of another port.
+  const std::complex<double> i1(0.0, 1.0);
+  Eigen::MatrixXcd Mp_r = Eigen::MatrixXcd::Zero(3, 3);
+  Mp_r(1, 1) = i1;
+  Mp_r(1, 2) = Mp_r(2, 1) = 1.0e-4 * i1;
+  Mp_r(2, 2) = 1.0e-8 * i1;
+  Eigen::MatrixXcd Y = Eigen::MatrixXcd::Zero(5, 5);
+  Y.topLeftCorner(3, 3) = std::complex<double>(0.4, 2.0) * Mp_r;
+  Y(1, 3) = Y(3, 1) = 0.3;
+  Y(2, 3) = Y(3, 2) = 1.0e-6;
+  Y(3, 3) = std::complex<double>(1.0, -2.0);
+
+  // Roundoff of the modal correction and the aux-state directions in the row of the mode of
+  // the other port.
+  Y(0, 1) = Y(1, 0) = 1.0e-17;
+  Y(0, 3) = Y(3, 0) = 2.0e-19;
+  CHECK(RomOperatorTest::WavePortLoadRows(Y, Mp_r, 1) == std::vector<long>{1, 2, 3});
 }
