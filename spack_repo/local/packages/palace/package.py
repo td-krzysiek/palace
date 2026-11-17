@@ -451,7 +451,12 @@ class Palace(CMakePackage, CudaPackage, ROCmPackage):
             # neighbor data after a new marking, point matrices of uniform refinement), for
             # MFEM 4.10 and without CHANGELOG; to be replaced by the URL of the pull request
             # that supersedes PR 3847. First: the patches below apply after it.
-            patch("mfem_par_tet_marking.diff"),
+            patch(
+                "https://raw.githubusercontent.com/awslabs/palace/"
+                "5c455e31e939f4034d56428df868f114e3eaa1fb/extern/patch/mfem/"
+                "mfem_par_tet_marking.diff",
+                sha256="1df929f41f4ddc983586cb254b1ab8cf2170d92588bb62397e8560d908d4ae5e",
+            ),
             # https://github.com/mfem/mfem/pull/5353
             patch(
                 "https://raw.githubusercontent.com/awslabs/palace/"
@@ -563,7 +568,15 @@ class Palace(CMakePackage, CudaPackage, ROCmPackage):
     depends_on(
         "mfem",
         when="@0.20:",
-        patches=[patch("mfem_conforming_rebalance.diff", when="@4.10.0")],
+        patches=[
+            patch(
+                "https://raw.githubusercontent.com/awslabs/palace/"
+                "3814b0d2ffbce1be86f968625f0e257994001a90/extern/patch/mfem/"
+                "mfem_conforming_rebalance.diff",
+                sha256="b44ccdf616a5dd67d580f875108276e771338776eccf7875e4ffd73b44fb304b",
+                when="@4.10.0",
+            )
+        ],
     )
 
     with when("+scotch"):
