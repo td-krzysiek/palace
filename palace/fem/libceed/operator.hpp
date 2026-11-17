@@ -37,6 +37,7 @@ protected:
   std::vector<CeedVector> u, v;
   Vector dof_multiplicity;
   mutable Vector temp;
+  bool reference_action = false;
 
 public:
   Operator(int h, int w);
@@ -49,6 +50,10 @@ public:
   void AddSubOperator(CeedOperator sub_op, CeedOperator sub_op_t = nullptr);
 
   void Finalize();
+
+  // Explicit correctness workaround for affected generated CUDA interpolators.
+  // Other resources retain their native action; no warmup application is performed.
+  void SetReferenceAction(bool enable) { reference_action = enable; }
 
   void DestroyAssemblyData() const;
 
