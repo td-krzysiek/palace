@@ -77,7 +77,7 @@ void ConfigureMemory(const std::string &device_str, int device_id)
         // no coalescing action. This trades more allocation/synchronization work for VRAM.
         using Pool = umpire::strategy::QuickPool;
         constexpr std::size_t cache_bytes = 64ULL * 1024 * 1024;
-        auto trim = [](const Pool &pool) -> std::size_t
+        umpire::strategy::PoolCoalesceHeuristic<Pool> trim = [](const Pool &pool) -> std::size_t
         { return pool.getReleasableSize() >= cache_bytes ? 1 : 0; };
         rm.makeAllocator<Pool>(UMPIRE_DEVICE_POOL_NAME,
                               rm.getAllocator("DEVICE::" + std::to_string(device_id)),
