@@ -1,0 +1,442 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - Palace Coverage Report - home/runner/work/palace/palace/test/unit/test-eigenmode.cpp</title>
+  <link rel="stylesheet" type="text/css" href="../../../../../../../gcov.css">
+</head>
+
+<body>
+
+          <table width="100%" border=0 cellspacing=0 cellpadding=0>
+            <tr><td class="title">LCOV - code coverage report</td></tr>
+            <tr><td class="ruler"><img src="../../../../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+            <tr>
+              <td width="100%">
+                <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="10%" class="headerValue"><a href="../../../../../../../index.html">top level</a> - <a href="index.html">/home/runner/work/palace/palace/test/unit</a> - test-eigenmode.cpp<span style="font-size: 80%;"> (source / <a href="test-eigenmode.cpp.func-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="5%"></td>
+            <td width="5%" class="headerCovTableHead">Coverage</td>
+            <td width="5%" class="headerCovTableHead" title="Covered + Uncovered code">Total</td>
+            <td width="5%" class="headerCovTableHead" title="Exercised code only">Hit</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">Palace Coverage Report</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntryHi">95.5&nbsp;%</td>
+            <td class="headerCovTableEntry">177</td>
+            <td class="headerCovTableEntry">169</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test Date:</td>
+            <td class="headerValue">2026-11-15 00:31:47</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntryMed">81.2&nbsp;%</td>
+            <td class="headerCovTableEntry">16</td>
+            <td class="headerCovTableEntry">13</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+                  <tr><td><img src="../../../../../../../glass.png" width=3 height=3 alt=""></td></tr>
+                </table>
+              </td>
+            </tr>
+
+            <tr><td class="ruler"><img src="../../../../../../../glass.png" width=3 height=3 alt=""></td></tr>
+          </table>
+
+          <table cellpadding=0 cellspacing=0 border=0>
+            <tr>
+              <td><br></td>
+            </tr>
+            <tr>
+              <td>
+<pre class="sourceHeading">            Line data    Source code</pre>
+<pre class="source">
+<span id="L1"><span class="lineNum">       1</span>              : // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.</span>
+<span id="L2"><span class="lineNum">       2</span>              : // SPDX-License-Identifier: Apache-2.0</span>
+<span id="L3"><span class="lineNum">       3</span>              : </span>
+<span id="L4"><span class="lineNum">       4</span>              : #include &lt;cmath&gt;</span>
+<span id="L5"><span class="lineNum">       5</span>              : #include &lt;complex&gt;</span>
+<span id="L6"><span class="lineNum">       6</span>              : #include &lt;memory&gt;</span>
+<span id="L7"><span class="lineNum">       7</span>              : #include &lt;vector&gt;</span>
+<span id="L8"><span class="lineNum">       8</span>              : #include &lt;mfem.hpp&gt;</span>
+<span id="L9"><span class="lineNum">       9</span>              : #include &lt;catch2/catch_test_macros.hpp&gt;</span>
+<span id="L10"><span class="lineNum">      10</span>              : #include &lt;catch2/generators/catch_generators_all.hpp&gt;</span>
+<span id="L11"><span class="lineNum">      11</span>              : #include &quot;fem/fieldtransfer.hpp&quot;</span>
+<span id="L12"><span class="lineNum">      12</span>              : #include &quot;linalg/eps.hpp&quot;</span>
+<span id="L13"><span class="lineNum">      13</span>              : #include &quot;linalg/iterative.hpp&quot;</span>
+<span id="L14"><span class="lineNum">      14</span>              : #include &quot;linalg/jacobi.hpp&quot;</span>
+<span id="L15"><span class="lineNum">      15</span>              : #include &quot;linalg/ksp.hpp&quot;</span>
+<span id="L16"><span class="lineNum">      16</span>              : #include &quot;linalg/operator.hpp&quot;</span>
+<span id="L17"><span class="lineNum">      17</span>              : #include &quot;linalg/slepc.hpp&quot;</span>
+<span id="L18"><span class="lineNum">      18</span>              : #include &quot;linalg/vector.hpp&quot;</span>
+<span id="L19"><span class="lineNum">      19</span>              : #include &quot;utils/communication.hpp&quot;</span>
+<span id="L20"><span class="lineNum">      20</span>              : </span>
+<span id="L21"><span class="lineNum">      21</span>              : #if defined(PALACE_WITH_SLEPC)</span>
+<span id="L22"><span class="lineNum">      22</span>              : #include &lt;slepc.h&gt;</span>
+<span id="L23"><span class="lineNum">      23</span>              : #endif</span>
+<span id="L24"><span class="lineNum">      24</span>              : </span>
+<span id="L25"><span class="lineNum">      25</span>              : namespace palace</span>
+<span id="L26"><span class="lineNum">      26</span>              : {</span>
+<span id="L27"><span class="lineNum">      27</span>              : </span>
+<span id="L28"><span class="lineNum">      28</span> <span class="tlaGNC tlaBgGNC">          12 : TEST_CASE(&quot;Vector field transfer through refinement and rebalancing&quot;,</span></span>
+<span id="L29"><span class="lineNum">      29</span>              :           &quot;[eigenmode][Serial][Parallel]&quot;)</span>
+<span id="L30"><span class="lineNum">      30</span>              : {</span>
+<span id="L31"><span class="lineNum">      31</span>              :   // H(curl) fields of a space of order p, linear in the coordinates, are kept exactly</span>
+<span id="L32"><span class="lineNum">      32</span>              :   // through nonconforming refinement and rebalancing of their mesh.</span>
+<span id="L33"><span class="lineNum">      33</span> <span class="tlaGNC">          15 :   const auto type = GENERATE(mfem::Element::TETRAHEDRON, mfem::Element::HEXAHEDRON);</span></span>
+<span id="L34"><span class="lineNum">      34</span> <span class="tlaGNC">          18 :   const int order = GENERATE(1, 2);</span></span>
+<span id="L35"><span class="lineNum">      35</span>              :   MPI_Comm comm = Mpi::World();</span>
+<span id="L36"><span class="lineNum">      36</span> <span class="tlaGNC">          12 :   auto smesh = mfem::Mesh::MakeCartesian3D(3, 3, 3, type, 1.0, 1.0, 1.0);</span></span>
+<span id="L37"><span class="lineNum">      37</span> <span class="tlaGNC">          12 :   smesh.EnsureNCMesh(true);</span></span>
+<span id="L38"><span class="lineNum">      38</span> <span class="tlaGNC">          12 :   mfem::ParMesh pmesh(comm, smesh);</span></span>
+<span id="L39"><span class="lineNum">      39</span> <span class="tlaGNC">          12 :   mfem::ND_FECollection nd_fec(order, pmesh.Dimension());</span></span>
+<span id="L40"><span class="lineNum">      40</span>              : </span>
+<span id="L41"><span class="lineNum">      41</span>              :   // Two fields: a constant one, exact for every order, and a linear one for order 2.</span>
+<span id="L42"><span class="lineNum">      42</span> <span class="tlaGNC">      346152 :   auto Field = [order](const mfem::Vector &amp;x, int k, mfem::Vector &amp;E)</span></span>
+<span id="L43"><span class="lineNum">      43</span>              :   {</span>
+<span id="L44"><span class="lineNum">      44</span> <span class="tlaGNC">      346152 :     E.SetSize(3);</span></span>
+<span id="L45"><span class="lineNum">      45</span> <span class="tlaGNC">      346152 :     E(0) = 1.0 + ((order &gt; 1) ? 2.0 * x(1) - x(2) : 0.0);</span></span>
+<span id="L46"><span class="lineNum">      46</span> <span class="tlaGNC">      346152 :     E(1) = -0.5 + ((order &gt; 1) ? 3.0 * x(0) + x(2) : 0.0);</span></span>
+<span id="L47"><span class="lineNum">      47</span> <span class="tlaGNC">      346152 :     E(2) = 2.0 + ((order &gt; 1) ? x(0) - 4.0 * x(1) : 0.0);</span></span>
+<span id="L48"><span class="lineNum">      48</span> <span class="tlaGNC">      346152 :     if (k == 1)</span></span>
+<span id="L49"><span class="lineNum">      49</span>              :     {</span>
+<span id="L50"><span class="lineNum">      50</span> <span class="tlaGNC">      173076 :       E *= -0.25;</span></span>
+<span id="L51"><span class="lineNum">      51</span> <span class="tlaGNC">      173076 :       E(0) += 1.0;</span></span>
+<span id="L52"><span class="lineNum">      52</span>              :     }</span>
+<span id="L53"><span class="lineNum">      53</span> <span class="tlaGNC">      346164 :   };</span></span>
+<span id="L54"><span class="lineNum">      54</span> <span class="tlaGNC">          48 :   auto TrueDofs = [&amp;](mfem::ParFiniteElementSpace &amp;fespace, int k)</span></span>
+<span id="L55"><span class="lineNum">      55</span>              :   {</span>
+<span id="L56"><span class="lineNum">      56</span>              :     mfem::VectorFunctionCoefficient coeff(</span>
+<span id="L57"><span class="lineNum">      57</span> <span class="tlaGNC">      346200 :         3, [&amp;Field, k](const mfem::Vector &amp;x, mfem::Vector &amp;E) { Field(x, k, E); });</span></span>
+<span id="L58"><span class="lineNum">      58</span> <span class="tlaGNC">          48 :     mfem::ParGridFunction gf(&amp;fespace);</span></span>
+<span id="L59"><span class="lineNum">      59</span> <span class="tlaGNC">          48 :     gf.ProjectCoefficient(coeff);</span></span>
+<span id="L60"><span class="lineNum">      60</span> <span class="tlaGNC">          48 :     Vector tv(fespace.GetTrueVSize());</span></span>
+<span id="L61"><span class="lineNum">      61</span> <span class="tlaGNC">          48 :     gf.GetTrueDofs(tv);</span></span>
+<span id="L62"><span class="lineNum">      62</span> <span class="tlaGNC">          48 :     return tv;</span></span>
+<span id="L63"><span class="lineNum">      63</span> <span class="tlaGNC">          48 :   };</span></span>
+<span id="L64"><span class="lineNum">      64</span>              : </span>
+<span id="L65"><span class="lineNum">      65</span> <span class="tlaGNC">          12 :   VectorFieldTransfer transfer(pmesh, order);</span></span>
+<span id="L66"><span class="lineNum">      66</span>              :   {</span>
+<span id="L67"><span class="lineNum">      67</span> <span class="tlaGNC">          12 :     mfem::ParFiniteElementSpace nd_fespace(&amp;pmesh, &amp;nd_fec);</span></span>
+<span id="L68"><span class="lineNum">      68</span> <span class="tlaGNC">          36 :     for (int k = 0; k &lt; 2; k++)</span></span>
+<span id="L69"><span class="lineNum">      69</span>              :     {</span>
+<span id="L70"><span class="lineNum">      70</span> <span class="tlaGNC">          48 :       transfer.AddField(nd_fespace, TrueDofs(nd_fespace, k));</span></span>
+<span id="L71"><span class="lineNum">      71</span>              :     }</span>
+<span id="L72"><span class="lineNum">      72</span> <span class="tlaGNC">          12 :   }</span></span>
+<span id="L73"><span class="lineNum">      73</span> <span class="tlaGNC">          12 :   CHECK(transfer.Size() == 2u);</span></span>
+<span id="L74"><span class="lineNum">      74</span> <span class="tlaGNC">          24 :   CHECK(transfer.IsCurrent(pmesh));</span></span>
+<span id="L75"><span class="lineNum">      75</span>              : </span>
+<span id="L76"><span class="lineNum">      76</span>              :   // Refine the elements in a corner, twice, then rebalance.</span>
+<span id="L77"><span class="lineNum">      77</span> <span class="tlaGNC">          36 :   for (int it = 0; it &lt; 2; it++)</span></span>
+<span id="L78"><span class="lineNum">      78</span>              :   {</span>
+<span id="L79"><span class="lineNum">      79</span>              :     mfem::Array&lt;int&gt; marked;</span>
+<span id="L80"><span class="lineNum">      80</span> <span class="tlaGNC">        2796 :     for (int e = 0; e &lt; pmesh.GetNE(); e++)</span></span>
+<span id="L81"><span class="lineNum">      81</span>              :     {</span>
+<span id="L82"><span class="lineNum">      82</span>              :       mfem::Vector c;</span>
+<span id="L83"><span class="lineNum">      83</span> <span class="tlaGNC">        2772 :       pmesh.GetElementCenter(e, c);</span></span>
+<span id="L84"><span class="lineNum">      84</span> <span class="tlaGNC">        2772 :       if (c(0) &lt; 0.5 &amp;&amp; c(1) &lt; 0.5)</span></span>
+<span id="L85"><span class="lineNum">      85</span>              :       {</span>
+<span id="L86"><span class="lineNum">      86</span> <span class="tlaGNC">        1380 :         marked.Append(e);</span></span>
+<span id="L87"><span class="lineNum">      87</span>              :       }</span>
+<span id="L88"><span class="lineNum">      88</span>              :     }</span>
+<span id="L89"><span class="lineNum">      89</span> <span class="tlaGNC">          24 :     pmesh.GeneralRefinement(marked, 1, 0);</span></span>
+<span id="L90"><span class="lineNum">      90</span> <span class="tlaGNC">          48 :     CHECK(!transfer.IsCurrent(pmesh));</span></span>
+<span id="L91"><span class="lineNum">      91</span> <span class="tlaGNC">          24 :     transfer.Update();</span></span>
+<span id="L92"><span class="lineNum">      92</span> <span class="tlaGNC">          48 :     CHECK(transfer.IsCurrent(pmesh));</span></span>
+<span id="L93"><span class="lineNum">      93</span>              :   }</span>
+<span id="L94"><span class="lineNum">      94</span> <span class="tlaGNC">          12 :   pmesh.Rebalance();</span></span>
+<span id="L95"><span class="lineNum">      95</span> <span class="tlaGNC">          12 :   transfer.Update();</span></span>
+<span id="L96"><span class="lineNum">      96</span> <span class="tlaGNC">          24 :   CHECK(transfer.IsCurrent(pmesh));</span></span>
+<span id="L97"><span class="lineNum">      97</span>              : </span>
+<span id="L98"><span class="lineNum">      98</span> <span class="tlaGNC">          12 :   mfem::ParFiniteElementSpace nd_fespace(&amp;pmesh, &amp;nd_fec);</span></span>
+<span id="L99"><span class="lineNum">      99</span> <span class="tlaGNC">          36 :   for (int k = 0; k &lt; 2; k++)</span></span>
+<span id="L100"><span class="lineNum">     100</span>              :   {</span>
+<span id="L101"><span class="lineNum">     101</span> <span class="tlaGNC">          24 :     const auto ref = TrueDofs(nd_fespace, k);</span></span>
+<span id="L102"><span class="lineNum">     102</span>              :     Vector tv;</span>
+<span id="L103"><span class="lineNum">     103</span> <span class="tlaGNC">          24 :     transfer.GetField(k, nd_fespace, tv);</span></span>
+<span id="L104"><span class="lineNum">     104</span> <span class="tlaGNC">          24 :     REQUIRE(tv.Size() == ref.Size());</span></span>
+<span id="L105"><span class="lineNum">     105</span> <span class="tlaGNC">          24 :     tv -= ref;</span></span>
+<span id="L106"><span class="lineNum">     106</span> <span class="tlaGNC">          24 :     const double err = linalg::Norml2(comm, tv), norm = linalg::Norml2(comm, ref);</span></span>
+<span id="L107"><span class="lineNum">     107</span> <span class="tlaGNC">          24 :     CHECK(err &lt;= 1.0e-12 * norm);</span></span>
+<span id="L108"><span class="lineNum">     108</span>              :   }</span>
+<span id="L109"><span class="lineNum">     109</span> <span class="tlaGNC">          12 : }</span></span>
+<span id="L110"><span class="lineNum">     110</span>              : </span>
+<span id="L111"><span class="lineNum">     111</span>              : #if defined(PALACE_WITH_SLEPC)</span>
+<span id="L112"><span class="lineNum">     112</span>              : </span>
+<span id="L113"><span class="lineNum">     113</span>              : namespace</span>
+<span id="L114"><span class="lineNum">     114</span>              : {</span>
+<span id="L115"><span class="lineNum">     115</span>              : </span>
+<span id="L116"><span class="lineNum">     116</span>              : // The symmetric tridiagonal stencil [-1, 2 + i / n, -1] minus s times the identity (real,</span>
+<span id="L117"><span class="lineNum">     117</span>              : // as a complex operator) on a single process: distinct eigenvalues in (0, 5).</span>
+<span id="L118"><span class="lineNum">     118</span> <span class="tlaGNC">           7 : class TridiagonalEigenTestOperator : public ComplexOperator</span></span>
+<span id="L119"><span class="lineNum">     119</span>              : {</span>
+<span id="L120"><span class="lineNum">     120</span>              : private:</span>
+<span id="L121"><span class="lineNum">     121</span>              :   const double s;</span>
+<span id="L122"><span class="lineNum">     122</span>              : </span>
+<span id="L123"><span class="lineNum">     123</span>              : public:</span>
+<span id="L124"><span class="lineNum">     124</span> <span class="tlaGNC">           7 :   TridiagonalEigenTestOperator(int n, double s = 0.0) : ComplexOperator(n), s(s) {}</span></span>
+<span id="L125"><span class="lineNum">     125</span>              : </span>
+<span id="L126"><span class="lineNum">     126</span> <span class="tlaUNC tlaBgUNC">           0 :   bool IsReal() const override { return true; }</span></span>
+<span id="L127"><span class="lineNum">     127</span>              : </span>
+<span id="L128"><span class="lineNum">     128</span> <span class="tlaGNC tlaBgGNC">           7 :   void AssembleDiagonal(ComplexVector &amp;diag) const override</span></span>
+<span id="L129"><span class="lineNum">     129</span>              :   {</span>
+<span id="L130"><span class="lineNum">     130</span> <span class="tlaGNC">           7 :     diag.SetSize(height);</span></span>
+<span id="L131"><span class="lineNum">     131</span>              :     diag = 0.0;</span>
+<span id="L132"><span class="lineNum">     132</span> <span class="tlaGNC">           7 :     auto *D = diag.Real().HostWrite();</span></span>
+<span id="L133"><span class="lineNum">     133</span> <span class="tlaGNC">         847 :     for (int i = 0; i &lt; height; i++)</span></span>
+<span id="L134"><span class="lineNum">     134</span>              :     {</span>
+<span id="L135"><span class="lineNum">     135</span> <span class="tlaGNC">         840 :       D[i] = 2.0 + static_cast&lt;double&gt;(i) / height - s;</span></span>
+<span id="L136"><span class="lineNum">     136</span>              :     }</span>
+<span id="L137"><span class="lineNum">     137</span> <span class="tlaGNC">           7 :   }</span></span>
+<span id="L138"><span class="lineNum">     138</span>              : </span>
+<span id="L139"><span class="lineNum">     139</span> <span class="tlaGNC">       10308 :   void Mult(const ComplexVector &amp;x, ComplexVector &amp;y) const override</span></span>
+<span id="L140"><span class="lineNum">     140</span>              :   {</span>
+<span id="L141"><span class="lineNum">     141</span> <span class="tlaGNC">       10308 :     y.SetSize(height);</span></span>
+<span id="L142"><span class="lineNum">     142</span> <span class="tlaGNC">       10308 :     const auto *XR = x.Real().HostRead();</span></span>
+<span id="L143"><span class="lineNum">     143</span> <span class="tlaGNC">       10308 :     const auto *XI = x.Imag().HostRead();</span></span>
+<span id="L144"><span class="lineNum">     144</span> <span class="tlaGNC">       10308 :     auto *YR = y.Real().HostWrite();</span></span>
+<span id="L145"><span class="lineNum">     145</span> <span class="tlaGNC">       10308 :     auto *YI = y.Imag().HostWrite();</span></span>
+<span id="L146"><span class="lineNum">     146</span> <span class="tlaGNC">     1247268 :     for (int i = 0; i &lt; height; i++)</span></span>
+<span id="L147"><span class="lineNum">     147</span>              :     {</span>
+<span id="L148"><span class="lineNum">     148</span> <span class="tlaGNC">     1236960 :       const double d = 2.0 + static_cast&lt;double&gt;(i) / height - s;</span></span>
+<span id="L149"><span class="lineNum">     149</span> <span class="tlaGNC">     1236960 :       YR[i] =</span></span>
+<span id="L150"><span class="lineNum">     150</span> <span class="tlaGNC">     1236960 :           d * XR[i] - ((i &gt; 0) ? XR[i - 1] : 0.0) - ((i &lt; height - 1) ? XR[i + 1] : 0.0);</span></span>
+<span id="L151"><span class="lineNum">     151</span> <span class="tlaGNC">     1236960 :       YI[i] =</span></span>
+<span id="L152"><span class="lineNum">     152</span> <span class="tlaGNC">     1236960 :           d * XI[i] - ((i &gt; 0) ? XI[i - 1] : 0.0) - ((i &lt; height - 1) ? XI[i + 1] : 0.0);</span></span>
+<span id="L153"><span class="lineNum">     153</span>              :     }</span>
+<span id="L154"><span class="lineNum">     154</span> <span class="tlaGNC">       10308 :   }</span></span>
+<span id="L155"><span class="lineNum">     155</span>              : </span>
+<span id="L156"><span class="lineNum">     156</span> <span class="tlaUNC tlaBgUNC">           0 :   void AddMult(const ComplexVector &amp;x, ComplexVector &amp;y,</span></span>
+<span id="L157"><span class="lineNum">     157</span>              :                const std::complex&lt;double&gt; a = 1.0) const override</span>
+<span id="L158"><span class="lineNum">     158</span>              :   {</span>
+<span id="L159"><span class="lineNum">     159</span> <span class="tlaUNC">           0 :     ComplexVector t;</span></span>
+<span id="L160"><span class="lineNum">     160</span> <span class="tlaUNC">           0 :     Mult(x, t);</span></span>
+<span id="L161"><span class="lineNum">     161</span> <span class="tlaUNC">           0 :     y.Add(a, t);</span></span>
+<span id="L162"><span class="lineNum">     162</span> <span class="tlaUNC">           0 :   }</span></span>
+<span id="L163"><span class="lineNum">     163</span>              : };</span>
+<span id="L164"><span class="lineNum">     164</span>              : </span>
+<span id="L165"><span class="lineNum">     165</span> <span class="tlaGNC tlaBgGNC">           7 : class IdentityEigenTestOperator : public ComplexOperator</span></span>
+<span id="L166"><span class="lineNum">     166</span>              : {</span>
+<span id="L167"><span class="lineNum">     167</span>              : public:</span>
+<span id="L168"><span class="lineNum">     168</span> <span class="tlaGNC">           7 :   IdentityEigenTestOperator(int n) : ComplexOperator(n) {}</span></span>
+<span id="L169"><span class="lineNum">     169</span>              : </span>
+<span id="L170"><span class="lineNum">     170</span> <span class="tlaUNC tlaBgUNC">           0 :   bool IsReal() const override { return true; }</span></span>
+<span id="L171"><span class="lineNum">     171</span>              : </span>
+<span id="L172"><span class="lineNum">     172</span> <span class="tlaGNC tlaBgGNC">         128 :   void Mult(const ComplexVector &amp;x, ComplexVector &amp;y) const override { y = x; }</span></span>
+<span id="L173"><span class="lineNum">     173</span>              : </span>
+<span id="L174"><span class="lineNum">     174</span> <span class="tlaGNC">          14 :   void AddMult(const ComplexVector &amp;x, ComplexVector &amp;y,</span></span>
+<span id="L175"><span class="lineNum">     175</span>              :                const std::complex&lt;double&gt; a = 1.0) const override</span>
+<span id="L176"><span class="lineNum">     176</span>              :   {</span>
+<span id="L177"><span class="lineNum">     177</span> <span class="tlaGNC">          14 :     y.Add(a, x);</span></span>
+<span id="L178"><span class="lineNum">     178</span> <span class="tlaGNC">          14 :   }</span></span>
+<span id="L179"><span class="lineNum">     179</span>              : };</span>
+<span id="L180"><span class="lineNum">     180</span>              : </span>
+<span id="L181"><span class="lineNum">     181</span>              : // GMRES which records the relative tolerance of each solve.</span>
+<span id="L182"><span class="lineNum">     182</span> <span class="tlaUNC tlaBgUNC">           0 : class TolRecordingGmresSolver : public GmresSolver&lt;ComplexOperator&gt;</span></span>
+<span id="L183"><span class="lineNum">     183</span>              : {</span>
+<span id="L184"><span class="lineNum">     184</span>              : public:</span>
+<span id="L185"><span class="lineNum">     185</span>              :   mutable std::vector&lt;double&gt; tols;</span>
+<span id="L186"><span class="lineNum">     186</span>              : </span>
+<span id="L187"><span class="lineNum">     187</span> <span class="tlaGNC tlaBgGNC">           7 :   using GmresSolver&lt;ComplexOperator&gt;::GmresSolver;</span></span>
+<span id="L188"><span class="lineNum">     188</span>              : </span>
+<span id="L189"><span class="lineNum">     189</span> <span class="tlaGNC">         128 :   void Mult(const ComplexVector &amp;b, ComplexVector &amp;x) const override</span></span>
+<span id="L190"><span class="lineNum">     190</span>              :   {</span>
+<span id="L191"><span class="lineNum">     191</span> <span class="tlaGNC">         128 :     tols.push_back(GetRelTol());</span></span>
+<span id="L192"><span class="lineNum">     192</span> <span class="tlaGNC">         128 :     GmresSolver&lt;ComplexOperator&gt;::Mult(b, x);</span></span>
+<span id="L193"><span class="lineNum">     193</span> <span class="tlaGNC">         128 :   }</span></span>
+<span id="L194"><span class="lineNum">     194</span>              : };</span>
+<span id="L195"><span class="lineNum">     195</span>              : </span>
+<span id="L196"><span class="lineNum">     196</span>              : struct TridiagonalEigenTestResult</span>
+<span id="L197"><span class="lineNum">     197</span>              : {</span>
+<span id="L198"><span class="lineNum">     198</span>              :   std::vector&lt;std::complex&lt;double&gt;&gt; lambda;</span>
+<span id="L199"><span class="lineNum">     199</span>              :   std::vector&lt;ComplexVector&gt; x;</span>
+<span id="L200"><span class="lineNum">     200</span>              :   int its;                       // Number of restarts</span>
+<span id="L201"><span class="lineNum">     201</span>              :   std::vector&lt;double&gt; lin_tols;  // Tolerance of each linear solve</span>
+<span id="L202"><span class="lineNum">     202</span>              : };</span>
+<span id="L203"><span class="lineNum">     203</span>              : </span>
+<span id="L204"><span class="lineNum">     204</span>              : // Shift-and-invert Krylov-Schur solve for the nev eigenvalues of the tridiagonal operator</span>
+<span id="L205"><span class="lineNum">     205</span>              : // closest to the shift s, with GMRES and Jacobi preconditioning for the linear solves, from</span>
+<span id="L206"><span class="lineNum">     206</span>              : // the start vector v0 (a warm start if warm), with the tolerance first_tol for the first</span>
+<span id="L207"><span class="lineNum">     207</span>              : // num_first linear solves if positive.</span>
+<span id="L208"><span class="lineNum">     208</span> <span class="tlaGNC">           7 : TridiagonalEigenTestResult SolveTridiagonalEigenTest(int n, double s, int nev, int ncv,</span></span>
+<span id="L209"><span class="lineNum">     209</span>              :                                                      double tol, double lin_tol,</span>
+<span id="L210"><span class="lineNum">     210</span>              :                                                      const ComplexVector &amp;v0, bool warm,</span>
+<span id="L211"><span class="lineNum">     211</span>              :                                                      double first_tol = 0.0,</span>
+<span id="L212"><span class="lineNum">     212</span>              :                                                      int num_first = -1)</span>
+<span id="L213"><span class="lineNum">     213</span>              : {</span>
+<span id="L214"><span class="lineNum">     214</span> <span class="tlaGNC">           7 :   MPI_Comm comm = Mpi::World();</span></span>
+<span id="L215"><span class="lineNum">     215</span> <span class="tlaGNC">           7 :   TridiagonalEigenTestOperator K(n), A(n, s);</span></span>
+<span id="L216"><span class="lineNum">     216</span>              :   IdentityEigenTestOperator M(n);</span>
+<span id="L217"><span class="lineNum">     217</span> <span class="tlaGNC">           7 :   auto gmres = std::make_unique&lt;TolRecordingGmresSolver&gt;(comm, 0);</span></span>
+<span id="L218"><span class="lineNum">     218</span>              :   const auto *recorder = gmres.get();</span>
+<span id="L219"><span class="lineNum">     219</span>              :   gmres-&gt;SetRelTol(lin_tol);</span>
+<span id="L220"><span class="lineNum">     220</span> <span class="tlaGNC">           7 :   gmres-&gt;SetMaxIter(10 * n);</span></span>
+<span id="L221"><span class="lineNum">     221</span>              :   gmres-&gt;SetRestartDim(n);</span>
+<span id="L222"><span class="lineNum">     222</span>              :   ComplexKspSolver ksp(std::move(gmres),</span>
+<span id="L223"><span class="lineNum">     223</span> <span class="tlaGNC">          14 :                        std::make_unique&lt;JacobiSmoother&lt;ComplexOperator&gt;&gt;(comm));</span></span>
+<span id="L224"><span class="lineNum">     224</span> <span class="tlaGNC">           7 :   ksp.SetOperators(A, A);</span></span>
+<span id="L225"><span class="lineNum">     225</span> <span class="tlaGNC">           7 :   slepc::SlepcEPSSolver eps(comm, 0);</span></span>
+<span id="L226"><span class="lineNum">     226</span> <span class="tlaGNC">           7 :   eps.SetType(slepc::SlepcEigenvalueSolver::Type::KRYLOVSCHUR);</span></span>
+<span id="L227"><span class="lineNum">     227</span> <span class="tlaGNC">           7 :   eps.SetProblemType(slepc::SlepcEigenvalueSolver::ProblemType::GEN_NON_HERMITIAN);</span></span>
+<span id="L228"><span class="lineNum">     228</span> <span class="tlaGNC">           7 :   eps.SetOperators(K, M, EigenvalueSolver::ScaleType::NONE);</span></span>
+<span id="L229"><span class="lineNum">     229</span> <span class="tlaGNC">           7 :   eps.SetNumModes(nev, ncv);</span></span>
+<span id="L230"><span class="lineNum">     230</span> <span class="tlaGNC">           7 :   eps.SetTol(tol);</span></span>
+<span id="L231"><span class="lineNum">     231</span> <span class="tlaGNC">           7 :   eps.SetWhichEigenpairs(EigenvalueSolver::WhichType::TARGET_REAL);</span></span>
+<span id="L232"><span class="lineNum">     232</span> <span class="tlaGNC">           7 :   eps.SetLinearSolver(ksp);</span></span>
+<span id="L233"><span class="lineNum">     233</span> <span class="tlaGNC">           7 :   eps.SetShiftInvert(s);</span></span>
+<span id="L234"><span class="lineNum">     234</span> <span class="tlaGNC">           7 :   eps.SetInitialSpace(v0);</span></span>
+<span id="L235"><span class="lineNum">     235</span>              :   eps.SetWarmStart(warm);</span>
+<span id="L236"><span class="lineNum">     236</span>              :   eps.SetFirstCycleLinearSolverTol(first_tol, num_first);</span>
+<span id="L237"><span class="lineNum">     237</span> <span class="tlaGNC">           7 :   const int num_conv = eps.Solve();</span></span>
+<span id="L238"><span class="lineNum">     238</span> <span class="tlaGNC">           7 :   REQUIRE(num_conv &gt;= nev);</span></span>
+<span id="L239"><span class="lineNum">     239</span>              :   TridiagonalEigenTestResult result;</span>
+<span id="L240"><span class="lineNum">     240</span> <span class="tlaGNC">           7 :   result.its = eps.GetNumIterations();</span></span>
+<span id="L241"><span class="lineNum">     241</span> <span class="tlaGNC">           7 :   result.lin_tols = recorder-&gt;tols;</span></span>
+<span id="L242"><span class="lineNum">     242</span> <span class="tlaGNC">          21 :   for (int i = 0; i &lt; nev; i++)</span></span>
+<span id="L243"><span class="lineNum">     243</span>              :   {</span>
+<span id="L244"><span class="lineNum">     244</span> <span class="tlaGNC">          14 :     result.lambda.push_back(eps.GetEigenvalue(i));</span></span>
+<span id="L245"><span class="lineNum">     245</span> <span class="tlaGNC">          14 :     result.x.emplace_back(n);</span></span>
+<span id="L246"><span class="lineNum">     246</span> <span class="tlaGNC">          14 :     eps.GetEigenvector(i, result.x.back());</span></span>
+<span id="L247"><span class="lineNum">     247</span>              :   }</span>
+<span id="L248"><span class="lineNum">     248</span> <span class="tlaGNC">           7 :   return result;</span></span>
+<span id="L249"><span class="lineNum">     249</span> <span class="tlaGNC">           7 : }</span></span>
+<span id="L250"><span class="lineNum">     250</span>              : </span>
+<span id="L251"><span class="lineNum">     251</span>              : }  // namespace</span>
+<span id="L252"><span class="lineNum">     252</span>              : </span>
+<span id="L253"><span class="lineNum">     253</span> <span class="tlaGNC">           1 : TEST_CASE(&quot;Eigenmode tight first linear solves&quot;, &quot;[eigenmode][Serial]&quot;)</span></span>
+<span id="L254"><span class="lineNum">     254</span>              : {</span>
+<span id="L255"><span class="lineNum">     255</span>              :   // The tighter tolerance applies to the given number of first linear solves, or to the</span>
+<span id="L256"><span class="lineNum">     256</span>              :   // first Krylov cycle (ncv solves) if negative.</span>
+<span id="L257"><span class="lineNum">     257</span>              :   constexpr int n = 120, nev = 2, ncv = 8, num_first = 3;</span>
+<span id="L258"><span class="lineNum">     258</span>              :   const double tol = 1.0e-8, lin_tol = 1.0e-10, first_tol = 1.0e-12;</span>
+<span id="L259"><span class="lineNum">     259</span> <span class="tlaGNC">           1 :   ComplexVector v0(n);</span></span>
+<span id="L260"><span class="lineNum">     260</span> <span class="tlaGNC">           1 :   linalg::SetRandom(Mpi::World(), v0);</span></span>
+<span id="L261"><span class="lineNum">     261</span> <span class="tlaGNC">           3 :   for (int num : {num_first, -1})</span></span>
+<span id="L262"><span class="lineNum">     262</span>              :   {</span>
+<span id="L263"><span class="lineNum">     263</span>              :     const auto result = SolveTridiagonalEigenTest(n, 0.0, nev, ncv, tol, lin_tol, v0, false,</span>
+<span id="L264"><span class="lineNum">     264</span> <span class="tlaGNC">           2 :                                                   first_tol, num);</span></span>
+<span id="L265"><span class="lineNum">     265</span> <span class="tlaGNC">           2 :     const std::size_t num_tight = (num &gt; 0) ? num : ncv;</span></span>
+<span id="L266"><span class="lineNum">     266</span> <span class="tlaGNC">           2 :     REQUIRE(result.its &gt; 1);</span></span>
+<span id="L267"><span class="lineNum">     267</span> <span class="tlaGNC">           2 :     REQUIRE(result.lin_tols.size() &gt; num_tight);</span></span>
+<span id="L268"><span class="lineNum">     268</span> <span class="tlaGNC">          34 :     for (std::size_t i = 0; i &lt; result.lin_tols.size(); i++)</span></span>
+<span id="L269"><span class="lineNum">     269</span>              :     {</span>
+<span id="L270"><span class="lineNum">     270</span> <span class="tlaGNC">          53 :       CHECK(result.lin_tols[i] == ((i &lt; num_tight) ? first_tol : lin_tol));</span></span>
+<span id="L271"><span class="lineNum">     271</span>              :     }</span>
+<span id="L272"><span class="lineNum">     272</span> <span class="tlaGNC">           2 :   }</span></span>
+<span id="L273"><span class="lineNum">     273</span> <span class="tlaGNC">           1 : }</span></span>
+<span id="L274"><span class="lineNum">     274</span>              : </span>
+<span id="L275"><span class="lineNum">     275</span> <span class="tlaGNC">           1 : TEST_CASE(&quot;Eigenmode stable Ritz value convergence&quot;, &quot;[eigenmode][Serial]&quot;)</span></span>
+<span id="L276"><span class="lineNum">     276</span>              : {</span>
+<span id="L277"><span class="lineNum">     277</span>              :   // A warm-started shift-and-invert solve accepts an eigenpair only once its Ritz value is</span>
+<span id="L278"><span class="lineNum">     278</span>              :   // the same eigenpair as at the previous restart. A start vector which already combines</span>
+<span id="L279"><span class="lineNum">     279</span>              :   // the wanted eigenvectors then needs one more restart than its first Krylov cycle, which</span>
+<span id="L280"><span class="lineNum">     280</span>              :   // converges on the error estimates alone without the warm start.</span>
+<span id="L281"><span class="lineNum">     281</span>              :   constexpr int n = 120, nev = 2, ncv = 8;</span>
+<span id="L282"><span class="lineNum">     282</span>              :   const double s = 1.5, tol = 1.0e-10, lin_tol = 1.0e-12;</span>
+<span id="L283"><span class="lineNum">     283</span> <span class="tlaGNC">           1 :   ComplexVector v0(n);</span></span>
+<span id="L284"><span class="lineNum">     284</span> <span class="tlaGNC">           1 :   linalg::SetRandom(Mpi::World(), v0);</span></span>
+<span id="L285"><span class="lineNum">     285</span> <span class="tlaGNC">           1 :   const auto cold = SolveTridiagonalEigenTest(n, s, nev, ncv, tol, lin_tol, v0, false);</span></span>
+<span id="L286"><span class="lineNum">     286</span> <span class="tlaGNC">           1 :   CHECK(cold.its &gt; 1);</span></span>
+<span id="L287"><span class="lineNum">     287</span>              : </span>
+<span id="L288"><span class="lineNum">     288</span> <span class="tlaGNC">           1 :   ComplexVector v(n), r(n);</span></span>
+<span id="L289"><span class="lineNum">     289</span> <span class="tlaGNC">           1 :   linalg::SetRandom(Mpi::World(), r, 1);</span></span>
+<span id="L290"><span class="lineNum">     290</span>              :   v = cold.x[0];</span>
+<span id="L291"><span class="lineNum">     291</span> <span class="tlaGNC">           1 :   v.Add(1.0, cold.x[1]);</span></span>
+<span id="L292"><span class="lineNum">     292</span> <span class="tlaGNC">           1 :   v.Add(1.0e-12 / std::sqrt(static_cast&lt;double&gt;(n)), r);</span></span>
+<span id="L293"><span class="lineNum">     293</span> <span class="tlaGNC">           1 :   const auto first = SolveTridiagonalEigenTest(n, s, nev, ncv, tol, lin_tol, v, false);</span></span>
+<span id="L294"><span class="lineNum">     294</span> <span class="tlaGNC">           1 :   const auto warm = SolveTridiagonalEigenTest(n, s, nev, ncv, tol, lin_tol, v, true);</span></span>
+<span id="L295"><span class="lineNum">     295</span> <span class="tlaGNC">           1 :   CHECK(first.its == 1);</span></span>
+<span id="L296"><span class="lineNum">     296</span> <span class="tlaGNC">           1 :   CHECK(warm.its == 2);</span></span>
+<span id="L297"><span class="lineNum">     297</span> <span class="tlaGNC">           3 :   for (int i = 0; i &lt; nev; i++)</span></span>
+<span id="L298"><span class="lineNum">     298</span>              :   {</span>
+<span id="L299"><span class="lineNum">     299</span> <span class="tlaGNC">           2 :     CHECK(std::abs(first.lambda[i] - cold.lambda[i]) &lt;= 1.0e-8 * std::abs(cold.lambda[i]));</span></span>
+<span id="L300"><span class="lineNum">     300</span> <span class="tlaGNC">           2 :     CHECK(std::abs(warm.lambda[i] - cold.lambda[i]) &lt;= 1.0e-8 * std::abs(cold.lambda[i]));</span></span>
+<span id="L301"><span class="lineNum">     301</span>              :   }</span>
+<span id="L302"><span class="lineNum">     302</span>              : </span>
+<span id="L303"><span class="lineNum">     303</span>              :   // Inexact linear solves, for a shift below the spectrum (GMRES needs the full dimension</span>
+<span id="L304"><span class="lineNum">     304</span>              :   // for any tolerance at the interior shift): the Ritz values keep moving by about the</span>
+<span id="L305"><span class="lineNum">     305</span>              :   // error of the linear solves, but the warm-started solve still stops, after at most a few</span>
+<span id="L306"><span class="lineNum">     306</span>              :   // more restarts.</span>
+<span id="L307"><span class="lineNum">     307</span> <span class="tlaGNC">           1 :   const auto exact = SolveTridiagonalEigenTest(n, 0.0, nev, ncv, tol, lin_tol, v0, false);</span></span>
+<span id="L308"><span class="lineNum">     308</span> <span class="tlaGNC">           1 :   const auto inexact = SolveTridiagonalEigenTest(n, 0.0, nev, ncv, tol, 1.0e-6, v0, true);</span></span>
+<span id="L309"><span class="lineNum">     309</span> <span class="tlaGNC">           1 :   CHECK(inexact.its &lt;= exact.its + 3);</span></span>
+<span id="L310"><span class="lineNum">     310</span> <span class="tlaGNC">           3 :   for (int i = 0; i &lt; nev; i++)</span></span>
+<span id="L311"><span class="lineNum">     311</span>              :   {</span>
+<span id="L312"><span class="lineNum">     312</span> <span class="tlaGNC">           2 :     CHECK(std::abs(inexact.lambda[i] - exact.lambda[i]) &lt;=</span></span>
+<span id="L313"><span class="lineNum">     313</span>              :           1.0e-4 * std::abs(exact.lambda[i]));</span>
+<span id="L314"><span class="lineNum">     314</span>              :   }</span>
+<span id="L315"><span class="lineNum">     315</span> <span class="tlaGNC">           3 : }</span></span>
+<span id="L316"><span class="lineNum">     316</span>              : </span>
+<span id="L317"><span class="lineNum">     317</span> <span class="tlaGNC">           1 : TEST_CASE(&quot;Eigenmode quality factor region&quot;, &quot;[eigenmode][Serial]&quot;)</span></span>
+<span id="L318"><span class="lineNum">     318</span>              : {</span>
+<span id="L319"><span class="lineNum">     319</span>              :   // Region for eigenvalues λ = iω above the target λ = i s, with Q = |ω| / (2 Im{ω}).</span>
+<span id="L320"><span class="lineNum">     320</span>              :   const double s = 0.5, q_min = 0.54;</span>
+<span id="L321"><span class="lineNum">     321</span>              :   RG rg;</span>
+<span id="L322"><span class="lineNum">     322</span> <span class="tlaGNC">           1 :   PalacePetscCall(RGCreate(PETSC_COMM_SELF, &amp;rg));</span></span>
+<span id="L323"><span class="lineNum">     323</span> <span class="tlaGNC">           1 :   slepc::ConfigureQualityFactorRegion(rg, s, q_min);</span></span>
+<span id="L324"><span class="lineNum">     324</span> <span class="tlaGNC">          14 :   auto Inside = [&amp;rg](std::complex&lt;double&gt; omega)</span></span>
+<span id="L325"><span class="lineNum">     325</span>              :   {</span>
+<span id="L326"><span class="lineNum">     326</span> <span class="tlaGNC">          14 :     PetscScalar lambda = std::complex&lt;double&gt;(0.0, 1.0) * omega;</span></span>
+<span id="L327"><span class="lineNum">     327</span>              :     PetscInt inside;</span>
+<span id="L328"><span class="lineNum">     328</span> <span class="tlaGNC">          14 :     PalacePetscCall(RGCheckInside(rg, 1, &amp;lambda, nullptr, &amp;inside));</span></span>
+<span id="L329"><span class="lineNum">     329</span> <span class="tlaGNC">          14 :     return inside &gt; 0;</span></span>
+<span id="L330"><span class="lineNum">     330</span> <span class="tlaGNC">           1 :   };</span></span>
+<span id="L331"><span class="lineNum">     331</span>              :   auto Damped = [](double re, double q)</span>
+<span id="L332"><span class="lineNum">     332</span>              :   { return std::complex&lt;double&gt;(re, re / std::sqrt(4.0 * q * q - 1.0)); };</span>
+<span id="L333"><span class="lineNum">     333</span>              : </span>
+<span id="L334"><span class="lineNum">     334</span>              :   // Damped modes above the target.</span>
+<span id="L335"><span class="lineNum">     335</span> <span class="tlaGNC">           2 :   CHECK(Inside({1.0, 0.0}));</span></span>
+<span id="L336"><span class="lineNum">     336</span> <span class="tlaGNC">           2 :   CHECK(Inside(Damped(1.0, 1.0e6)));</span></span>
+<span id="L337"><span class="lineNum">     337</span> <span class="tlaGNC">           2 :   CHECK(Inside(Damped(1.0, 0.6)));</span></span>
+<span id="L338"><span class="lineNum">     338</span> <span class="tlaGNC">           2 :   CHECK(Inside(Damped(1.0, 0.55)));</span></span>
+<span id="L339"><span class="lineNum">     339</span> <span class="tlaGNC">           2 :   CHECK(Inside(Damped(100.0, 0.55)));</span></span>
+<span id="L340"><span class="lineNum">     340</span> <span class="tlaGNC">           2 :   CHECK(!Inside(Damped(1.0, 0.53)));</span></span>
+<span id="L341"><span class="lineNum">     341</span> <span class="tlaGNC">           2 :   CHECK(!Inside(Damped(1.0, 0.501)));</span></span>
+<span id="L342"><span class="lineNum">     342</span> <span class="tlaGNC">           2 :   CHECK(!Inside(Damped(100.0, 0.53)));</span></span>
+<span id="L343"><span class="lineNum">     343</span>              : </span>
+<span id="L344"><span class="lineNum">     344</span>              :   // Modes below the target.</span>
+<span id="L345"><span class="lineNum">     345</span> <span class="tlaGNC">           1 :   CHECK(!Inside({0.4, 0.0}));</span></span>
+<span id="L346"><span class="lineNum">     346</span> <span class="tlaGNC">           2 :   CHECK(!Inside(Damped(0.4, 10.0)));</span></span>
+<span id="L347"><span class="lineNum">     347</span>              : </span>
+<span id="L348"><span class="lineNum">     348</span>              :   // Growing modes are kept for |Q| &gt;= 10 only.</span>
+<span id="L349"><span class="lineNum">     349</span> <span class="tlaGNC">           2 :   CHECK(Inside(std::conj(Damped(1.0, 1.0e6))));</span></span>
+<span id="L350"><span class="lineNum">     350</span> <span class="tlaGNC">           2 :   CHECK(Inside(std::conj(Damped(1.0, 10.5))));</span></span>
+<span id="L351"><span class="lineNum">     351</span> <span class="tlaGNC">           2 :   CHECK(!Inside(std::conj(Damped(1.0, 9.5))));</span></span>
+<span id="L352"><span class="lineNum">     352</span> <span class="tlaGNC">           2 :   CHECK(!Inside(std::conj(Damped(1.0, 1.0))));</span></span>
+<span id="L353"><span class="lineNum">     353</span> <span class="tlaGNC">           1 :   PalacePetscCall(RGDestroy(&amp;rg));</span></span>
+<span id="L354"><span class="lineNum">     354</span> <span class="tlaGNC">           1 : }</span></span>
+<span id="L355"><span class="lineNum">     355</span>              : </span>
+<span id="L356"><span class="lineNum">     356</span>              : #endif</span>
+<span id="L357"><span class="lineNum">     357</span>              : </span>
+<span id="L358"><span class="lineNum">     358</span>              : }  // namespace palace</span>
+        </pre>
+              </td>
+            </tr>
+          </table>
+          <br>
+
+          <table width="100%" border=0 cellspacing=0 cellpadding=0>
+            <tr><td class="ruler"><img src="../../../../../../../glass.png" width=3 height=3 alt=""></td></tr>
+            <tr><td class="versionInfo">Generated by: <a href="https://github.com//linux-test-project/lcov" target="_parent">LCOV version 2.0-1</a></td></tr>
+          </table>
+          <br>
+
+</body>
+</html>
