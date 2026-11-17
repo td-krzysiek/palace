@@ -1997,7 +1997,7 @@
         },
         {
           "const": "Parallel",
-          "description": "Partition the mesh with PT-Scotch and move the elements between the ranks, without gathering the mesh. The refinement flags of the tetrahedra are kept. Requires *Palace* built with PT-Scotch, and a mesh of triangles or tetrahedra: for other meshes, or if the partition would leave a rank without elements, the mesh is repartitioned as with `\"Gather\"`, with a warning."
+          "description": "Partition the mesh with PT-Scotch and move the elements between the ranks, without gathering the mesh. The tetrahedra are then marked for refinement anew (longest edge), as with `\"Gather\"`. Requires *Palace* built with PT-Scotch, and a mesh of triangles or tetrahedra: for other meshes, or if the partition would leave a rank without elements, the mesh is repartitioned as with `\"Gather\"`, with a warning."
         }
       ]
     },

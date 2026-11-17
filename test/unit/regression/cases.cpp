@@ -24,6 +24,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "regression_helpers.hpp"
+#include "utils/communication.hpp"
 #include "utils/constants.hpp"
 #include "utils/tablecsv.hpp"
 
@@ -1536,19 +1537,23 @@ TEST_CASE("spheres", "[Serial][Parallel][GPU][Regression]")
 }
 
 // Conformal AMR with a rebalance after each refinement, by each value of
-// config["Model"]["Refinement"]["RebalanceMethod"] (curved tetrahedra), compared with a
-// serial run (no rebalance). The marking of tetrahedra of mfem_par_tet_marking.diff does
-// not depend on the partition, so the parallel method refines as the serial run does. The
-// gather method marks the whole mesh anew at each rebalance, so it is compared after one
-// refinement only. The references are a serial run; on 2, 3, 4 and 8 processes the
-// capacitances and energies agree with them to the printed digits, the surface fluxes to
-// 4.3e-9 and the norm of the error estimate to 1.1e-9. Omits [GPU]: adaptive cases skip
-// GPU CI (cf. circular_hole_london_nc_amr).
+// config["Model"]["Refinement"]["RebalanceMethod"] (curved tetrahedra). Both methods mark
+// the mesh anew at each rebalance, and a serial run does not rebalance: the parallel
+// method, with two refinements, is compared with a run on 2 processes and skipped on one;
+// the gather method, compared after one refinement only, with a serial run. After a
+// parallel refinement of curved tetrahedra the copies of shared nodes can differ by
+// round-off, so the second marking, and the results, depend a little on the number of
+// processes (the norm of the error estimate by up to 3.2e-4 from 2 to 8 processes). Omits
+// [GPU]: adaptive cases skip GPU CI (cf. circular_hole_london_nc_amr).
 TEST_CASE("spheres_amr_rebalance_parallel", "[Serial][Parallel][Regression]")
 {
 #if !defined(PALACE_WITH_SCOTCH)
   SKIP("Parallel rebalancing requires Palace built with PT-Scotch");
 #endif
+  if (palace::Mpi::Size(palace::Mpi::World()) == 1)
+  {
+    SKIP("Rebalancing requires more than one process");
+  }
   palace::test::RegressionOptions opts;
   opts.rtol = 1.0e-4;
   opts.atol = 1.0e-16;

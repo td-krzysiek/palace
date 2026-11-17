@@ -415,10 +415,10 @@ TEST_CASE("GetGlobalEntityCounts", "[rebalance][Serial][Parallel]")
 TEST_CASE("RebalanceMesh conformal", "[rebalance][Serial][Parallel]")
 {
   // The same unbalanced mesh, rebalanced with the gather method and with the parallel
-  // method: same mesh (counts, boundary elements of each attribute, volume), balanced. The
-  // parallel method keeps the vertex order and the refinement flags of the elements, and a
-  // later refinement gives the mesh of the same refinement in serial; the gather method
-  // recomputes the refinement flags of the tetrahedra.
+  // method: same mesh (counts, boundary elements of each attribute, volume), balanced. Both
+  // methods mark the rebalanced mesh again: its vertex orders and refinement flags are
+  // those of the serial mesh marked again, and a later refinement gives the mesh of the
+  // same refinement of that serial mesh. On one process there is no rebalance.
   MPI_Comm comm = Mpi::World();
   const int size = Mpi::Size(comm);
   for (int dim : {2, 3})
@@ -428,6 +428,13 @@ TEST_CASE("RebalanceMesh conformal", "[rebalance][Serial][Parallel]")
     RefineBall(serial, 0.35, 0.2);
     std::vector<int> part = UnbalancedPartition(serial, size);
     const Counts counts = GetCounts(serial);
+    mfem::Mesh marked(serial);
+    marked.Finalize(true);
+    std::vector<std::vector<double>> marked_elements;
+    {
+      mfem::ParMesh pmarked(comm, marked, part.data());
+      marked_elements = GatherElements(pmarked);
+    }
     std::vector<RebalanceMethod> methods = {RebalanceMethod::GATHER};
 #if defined(PALACE_WITH_SCOTCH)
     methods.push_back(RebalanceMethod::PARALLEL);
@@ -445,25 +452,28 @@ TEST_CASE("RebalanceMesh conformal", "[rebalance][Serial][Parallel]")
         CHECK(ratio > 1.0);
         CHECK(Imbalance(*pmesh) <= 1.2);
       }
-      if (method == RebalanceMethod::PARALLEL)
+      if (size > 1)
+      {
+        // The vertex orders and refinement flags of a new marking, which differ in 3D from
+        // those the mesh had.
+        CHECK(after == marked_elements);
+        if (dim == 3 && Mpi::Root(comm))
+        {
+          CHECK(after != before);
+        }
+      }
+      else
       {
         CHECK(after == before);
       }
-      else if (dim == 3 && size > 1 && Mpi::Root(comm))
-      {
-        // The refinement flags (and vertex orders) are those of a new marking.
-        CHECK(after != before);
-      }
 
-      // Refine the rebalanced mesh, and the serial mesh the same way.
-      mfem::Mesh serial_refined(serial);
+      // Refine the rebalanced mesh, and the serial mesh (marked again, if the mesh was
+      // rebalanced) the same way.
+      mfem::Mesh serial_refined((size > 1) ? marked : serial);
       RefineBall(*pmesh, 0.6, 0.25);
       RefineBall(serial_refined, 0.6, 0.25);
       const Counts refined = GetCounts(*pmesh), serial_counts = GetCounts(serial_refined);
-      if (method == RebalanceMethod::PARALLEL || size == 1)
-      {
-        CHECK(refined == serial_counts);
-      }
+      CHECK(refined == serial_counts);
       CHECK(std::abs(refined.volume - serial_counts.volume) <= 1.0e-12);
     }
   }

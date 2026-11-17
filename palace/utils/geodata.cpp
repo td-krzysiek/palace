@@ -4921,6 +4921,10 @@ bool RebalanceConformalMeshParallel(const IoData &iodata, mfem::ParMesh &mesh)
     return false;
   }
   mesh.Rebalance(partitioning);
+  // Mark the mesh again, as the gather does when it rebuilds the mesh: keeping the
+  // refinement flags gave worse-shaped elements and 18% more solver iterations on a
+  // production case.
+  mesh.Finalize(true);
   return true;
 }
 

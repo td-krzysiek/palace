@@ -63,10 +63,10 @@ selects how:
 
   - `"Parallel"` (the default when *Palace* is built with PT-Scotch, `PALACE_WITH_SCOTCH`):
     the element graph of the mesh is partitioned with PT-Scotch and the elements move
-    between the processes, so that no process ever holds the whole mesh. The refinement
-    flags of the tetrahedra are kept. For meshes other than triangle or tetrahedron meshes,
-    or if the partition would leave a process without elements, the mesh is repartitioned
-    as with `"Gather"`, with a warning.
+    between the processes, so that no process ever holds the whole mesh. The tetrahedra are
+    then marked for refinement anew (longest edge), as with `"Gather"`. For meshes other
+    than triangle or tetrahedron meshes, or if the partition would leave a process without
+    elements, the mesh is repartitioned as with `"Gather"`, with a warning.
   - `"Gather"` (the default otherwise): the mesh is gathered on the root process,
     partitioned there with METIS, and distributed again. The root process then holds the
     whole mesh, and the tetrahedra are marked for refinement anew (longest edge).
