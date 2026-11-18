@@ -255,9 +255,13 @@ int main(int argc, char *argv[])
   {
     BlockTimer bt(Timer::INIT);
     omp_threads = utils::ConfigureOmp();
-    ngpu = utils::GetDeviceCount();
     const std::string device_str = ConfigureDevice(iodata.solver.device);
-    const int device_id = utils::GetDeviceId(world_comm, ngpu);
+    // CUDA/HIP builds can also run CPU-only jobs without a visible GPU. In that
+    // case querying the accelerator count can abort before the CPU device is
+    // configured, and assigning a rank to an empty device set is invalid.
+    const bool use_gpu = iodata.solver.device == Device::GPU;
+    ngpu = use_gpu ? utils::GetDeviceCount() : 0;
+    const int device_id = use_gpu ? utils::GetDeviceId(world_comm, ngpu) : 0;
     utils::ConfigureMemory(device_str, device_id);
     device.emplace(device_str, device_id);
     ConfigureCeedBackend(iodata.solver.ceed_backend);
