@@ -4,7 +4,7 @@ Usage: python3 run.py /path/to/palace /path/to/mpirun /fresh/output
 Run inside a device-free container; this is not a --dry-run check.
 """
 from pathlib import Path
-import json,os,subprocess,sys
+import csv,json,math,os,subprocess,sys
 binary,mpi,out=Path(sys.argv[1]),Path(sys.argv[2]),Path(sys.argv[3]);out.mkdir()
 assert not list(Path('/dev').glob('nvidia[0-9]*'))
 fixture=Path(__file__).resolve().parent
@@ -21,6 +21,12 @@ with(out/'solver.log').open('w')as log:
 text=(out/'solver.log').read_text()
 assert result.returncode==0,text[-2500:]
 assert 'Device configuration: cpu'in text and 'CG solver converged'in text
+# Distinguish the fatal MFEM startup error from retained HYPRE device diagnostics.
 assert 'CUDA error:'not in text and 'HIP error:'not in text
+hypre_diagnostics=[line for line in text.splitlines()if 'CUDA ERROR'in line]
+assert all('code = 100'in line and '/hypre/'in line for line in hypre_diagnostics),hypre_diagnostics
+with(out/'results/terminal-C.csv').open()as stream:capacitance=float(list(csv.reader(stream))[1][1])
+expected=1/(4*math.pi*1e-7*299792458**2)
+assert abs(capacitance/expected-1)<1e-7,(capacitance,expected)
 assert list((out/'results').glob('*.csv'))
-print(json.dumps(dict(status='PASS',mpiRanks=2,executionDevice='CPU',gpuDeviceNodes=[],exitCode=result.returncode)))
+print(json.dumps(dict(status='PASS',mpiRanks=2,executionDevice='CPU',gpuDeviceNodes=[],exitCode=result.returncode,capacitanceF=capacitance,expectedCapacitanceF=expected,retainedHypreDiagnostics=hypre_diagnostics)))

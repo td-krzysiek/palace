@@ -1,0 +1,7 @@
+# 18 November 2026 qualification
+
+Pinned base Palace6e185f2413d6c4c8c16e0953f0be345342a95e95. Device-free two-rank negative control: executable5ac85f72d9dd05d737443cbc0385e03bebd0421f84d03a77ca6533386c475f2c aborts with MFEM cudaGetDeviceCount code100. Positive separately built executable122b25a47277c98a8804e3093fc62af25281589ea4a6c50eae6e790e59bc67ca, combined runtime sourcee8551c59f738c0d468d82945aa8096c89500f6ba, completes the same nonzero six-tetrahedron electrostatic problem. Measured capacitance8.854187818789e-12F agrees with the analytic epsilon0*A/d within1e-7relative. No GPU device nodes were exposed.
+
+Only main was recompiled. Frozen libraryf8ed2e93ac0806166b20b3e254e51c637dc35e83f829c2017d993e68a9d94339, device/curl objects, dependencies and JIT manifest2499140be6519c05b2a6790e74d7ee95d428b4f03adc6776d19aa7312deadef4 remain unchanged. A regression-harness attempt with self/tcp transport failed before MPI initialization because only loopback was available and TCP excluded it; preserved separately, then corrected to the already working self/smcuda/tcp transport.
+
+Remaining limitation: GPU-enabled HYPRE logs two code100 device diagnostics in the minimal CPU run. This PR does not suppress or repair those dependency calls. Analytic capacitance is verified; a fresh matched one-patch CPU all-complex E/B/ports/energy/flux comparison remains in progress before a bounded full-model CPU test. No new qualification for GPU execution, large-model capacity or full-antenna convergence is claimed. Public regression assets exclude private antenna geometry.
