@@ -1,0 +1,5 @@
+# CPU startup in an accelerator-enabled build
+
+The six-tetrahedron cube has a grounded X=0 face and a unit-potential terminal at X=1; other faces are insulating. This solves a nonzero electrostatic problem through the real executable, using two MPI ranks and order2. Run `run.py` with the executable, mpirun and a fresh output directory inside a CUDA/HIP-library-capable container with no accelerator device nodes. It must reach a converged CG solve and write CSV results. A dry-run cannot reproduce the failure because it bypasses numerical initialization.
+
+Before the fix, the pinned CUDA executable aborted in MFEM's `cudaGetDeviceCount` with code100 before mesh/operator construction, despite `Solver.Device=CPU` and `/cpu/self`. The fix skips accelerator enumeration and rank assignment for CPU/Debug selections; GPU selection retains the previous branch. This does not alter Maxwell matrices, preconditioners or Krylov recurrences. Accelerator execution remains a separate qualification; this test does not claim that a CPU-mode run matches GPU fields or that a large antenna converges.
